@@ -1,0 +1,6 @@
+streamlit>=1.32
+opencv-python>=4.9
+numpy>=1.24
+pandas>=2.0
+rtmlib>=0.0.13
+onnxruntime>=1.17
