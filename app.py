@@ -250,28 +250,28 @@ st.markdown(
         div[role="radiogroup"] label
     ) { color: #1e293b !important; }
 
-    button[kind="secondary"] {
+    button[data-testid^="stBaseButton-secondary"], button[kind="secondary"] {
         background-color: #ffffff !important;
         color: #1e293b !important;
         border: 1px solid rgba(30,58,95,0.35) !important;
     }
-    button[kind="secondary"]:hover {
+    button[data-testid^="stBaseButton-secondary"]:hover, button[kind="secondary"]:hover {
         background-color: #f1f5f9 !important;
         border-color: #1e3a5f !important;
         color: #1e3a5f !important;
     }
-    button[kind="secondary"] p { color: inherit !important; }
+    button[data-testid^="stBaseButton-secondary"] *, button[kind="secondary"] * { color: inherit !important; }
 
-    button[kind="primary"] {
+    button[data-testid^="stBaseButton-primary"], button[kind="primary"] {
         background-color: #e15b4f !important;
         border-color: #e15b4f !important;
         color: #ffffff !important;
     }
-    button[kind="primary"]:hover {
+    button[data-testid^="stBaseButton-primary"]:hover, button[kind="primary"]:hover {
         background-color: #c94b40 !important;
         border-color: #c94b40 !important;
     }
-    button[kind="primary"] p { color: #ffffff !important; }
+    button[data-testid^="stBaseButton-primary"] *, button[kind="primary"] * { color: #ffffff !important; }
 
     div[data-testid="stTextInput"] input,
     div[data-testid="stTextArea"] textarea,
@@ -299,9 +299,11 @@ st.markdown(
     }
     div[data-testid="stFileUploader"] button,
     div[data-testid="stFileUploader"] button * { color: #ffffff !important; }
-    div[data-testid="stFileUploaderFile"] {
+    div[data-testid="stFileChip"] {
         background-color: #f8fafc !important;
+        border: 1px solid rgba(30,58,95,0.15) !important;
     }
+    div[data-testid="stFileChip"] * { color: #1e293b !important; }
     </style>
     """,
     unsafe_allow_html=True,
