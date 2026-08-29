@@ -12,9 +12,6 @@ survive after the temp dir is cleaned up.
 NOTE on hosting: if this app is deployed to a free-tier Hugging Face
 Space, the Space's disk is NOT persistent across restarts/sleep — sessions
 saved here will be lost when the Space goes to sleep and wakes back up.
-For long-term storage, back this with a real database or object storage
-instead. For local `streamlit run app.py` use, this just works as a
-normal folder on disk.
 """
 
 import json
@@ -25,10 +22,6 @@ from pathlib import Path
 
 SESSIONS_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "sessions"
 INDEX_FILE = SESSIONS_DIR / "index.json"
-
-# Deduction dict keys that are metadata, not a deduction amount itself —
-# skipped when building the "top issues" summary string.
-_NON_DEDUCTION_SUFFIXES = ("_abs", "_rel", "_degrees", "_value")
 
 
 def _ensure_dirs():
@@ -65,14 +58,12 @@ def save_session(swimmer_id, mode, score_result, file_paths, official_keys):
     """
     swimmer_id: str
     mode: 'Walticam' / 'Above-Water' / 'Underwater' / 'Above+Below'
-    score_result: the dict returned by BarracudaScorer.score_figure() /
-        score_single_pair() (has 'score', 'base_score', 'total_deduction',
-        'deductions')
+    score_result: dict returned by BarracudaScorer.score_figure() /
+        score_single_pair()
     file_paths: dict, any of {"video", "above_video", "below_video",
         "above_csv", "below_csv"} -> path (existing paths only get copied)
-    official_keys: list of deduction keys that count toward the score
-        (pass BarracudaScorer()._deduction_keys() from the caller) — used
-        just to build the "top issues" summary line.
+    official_keys: list of deduction keys that count toward the score —
+        used to build the "top issues" summary line.
     """
     _ensure_dirs()
 
@@ -99,11 +90,13 @@ def save_session(swimmer_id, mode, score_result, file_paths, official_keys):
         "base_score": score_result.get("base_score"),
         "total_deduction": score_result.get("total_deduction"),
         "summary": summary,
+        "deductions": deductions,
+        "official_keys": list(official_keys),
         "files": saved_files,
     }
 
     sessions = load_sessions()
-    sessions.insert(0, record)  # newest first
+    sessions.insert(0, record)
     _save_index(sessions)
     return record
 
