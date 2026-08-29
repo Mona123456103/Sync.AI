@@ -181,9 +181,9 @@ st.markdown(
     div[data-testid="column"]:has(.bl-wordmark) { padding-top: 6px; }
 
     .bl-hero {
-        background: linear-gradient(120deg, #1e3a5f 0%, #24476f 55%, #163150 100%);
+        background: linear-gradient(120deg, #0e7490 0%, #0c6280 55%, #0c4a6e 100%);
         border-radius: 16px; padding: 32px 30px; margin: 8px 0 20px 0;
-        color: white; box-shadow: 0 8px 22px rgba(30,58,95,0.28);
+        color: white; box-shadow: 0 8px 22px rgba(14,116,144,0.28);
     }
     .bl-hero h1 { color: white; margin: 0 0 8px 0; font-size: 2rem; }
     .bl-hero p { color: rgba(255,255,255,0.9) !important; margin: 0; font-size: 1.03rem; line-height: 1.55; }
@@ -242,14 +242,12 @@ st.markdown(
        text from getting caught by the same reset).
        --------------------------------------------------------------- */
     :where(
-        .stMarkdown p, .stMarkdown li, .stMarkdown span,
-        div[data-testid="stCaptionContainer"] p,
-        div[data-testid="stCaptionContainer"] span,
-        div[data-testid="stWidgetLabel"] p,
-        div[data-testid="stMetricLabel"] p,
-        div[data-testid="stMetricValue"],
-        div[role="radiogroup"] label p,
-        div[role="radiogroup"] label span
+        .stMarkdown,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stWidgetLabel"],
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricValue"],
+        div[role="radiogroup"] label
     ) { color: #1e293b !important; }
 
     button[kind="secondary"] {
@@ -284,22 +282,26 @@ st.markdown(
         border-color: rgba(30,58,95,0.25) !important;
     }
 
-    div[data-testid="stFileUploaderDropzone"] {
+    /* File uploader — target the stable stFileUploader wrapper and its
+       native <section> dropzone rather than an inner testid, since that
+       inner one wasn't matching the deployed component's markup. Set
+       every descendant dark first, then re-lighten just the browse
+       button's text — source order makes the later, more specific rule
+       win for elements matched by both. */
+    div[data-testid="stFileUploader"] * { color: #1e293b !important; }
+    div[data-testid="stFileUploader"] section {
         background-color: #ffffff !important;
         border: 1px dashed rgba(30,58,95,0.3) !important;
     }
-    div[data-testid="stFileUploaderDropzone"] * { color: #1e293b !important; }
-    div[data-testid="stFileUploaderDropzone"] button {
+    div[data-testid="stFileUploader"] button {
         background-color: #1e293b !important;
-        color: #ffffff !important;
         border: none !important;
     }
-    div[data-testid="stFileUploaderDropzone"] button * { color: #ffffff !important; }
+    div[data-testid="stFileUploader"] button,
+    div[data-testid="stFileUploader"] button * { color: #ffffff !important; }
     div[data-testid="stFileUploaderFile"] {
         background-color: #f8fafc !important;
-        color: #1e293b !important;
     }
-    div[data-testid="stFileUploaderFile"] * { color: #1e293b !important; }
     </style>
     """,
     unsafe_allow_html=True,
