@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-ISSUE REPORTS — persists Help-page bug reports to disk, and builds a
-mailto: link so a report can also reach the developer by email even on
-hosting where the disk doesn't persist (see session_store.py's note on
-free-tier Streamlit Community Cloud / Hugging Face Spaces).
+ISSUE REPORTS — stores bug reports submitted from the Help page.
+==================================================================
+Since this app doesn't have SMTP/email credentials configured, a report
+is:
+  1. Saved locally to reports/index.json (survives local `streamlit run`
+     use; NOT persistent on free-tier hosting, same caveat as
+     session_store.py's sessions/).
+  2. Also offered as a pre-filled mailto: link, so the person can send it
+     directly from their own email client to DEVELOPER_EMAIL below — this
+     works with zero server-side email setup.
 
-app.py calls:
-    save_report(name, contact_email, description, page_context)
-        -> (record, mailto_url)
-    load_reports()
-        -> newest-first list of report dicts
-
-Same on-disk pattern as session_store.py: a JSON index file in a folder
-next to app.py.
+SET THIS before deploying:
 """
+DEVELOPER_EMAIL = "YOUR_EMAIL_HERE@example.com"  # <-- Mona: put your real email here
 
 import json
 import os
@@ -24,10 +24,6 @@ from pathlib import Path
 REPORTS_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "reports"
 INDEX_FILE = REPORTS_DIR / "index.json"
 
-# Where the "email this report" link is addressed to. Change this to the
-# address that should actually receive bug reports.
-DEVELOPER_EMAIL = "your-email@example.com"
-
 
 def _ensure_dirs():
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,7 +32,6 @@ def _ensure_dirs():
 
 
 def load_reports():
-    """Newest-first list of report dicts."""
     _ensure_dirs()
     try:
         return json.loads(INDEX_FILE.read_text())
@@ -48,44 +43,34 @@ def _save_index(reports):
     INDEX_FILE.write_text(json.dumps(reports, indent=2))
 
 
-def _build_mailto(name, contact_email, description, page_context):
-    subject = f"Sync.AI issue report — {page_context}"
+def save_report(name, contact_email, description, page_context=""):
+    """Saves a report locally and returns (record, mailto_url)."""
+    _ensure_dirs()
+    record = {
+        "id": time.strftime("%Y%m%d_%H%M%S"),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "name": name or "Anonymous",
+        "contact_email": contact_email or "",
+        "description": description,
+        "page_context": page_context,
+    }
+    reports = load_reports()
+    reports.insert(0, record)
+    _save_index(reports)
+
+    subject = f"Sync.AI issue report from {record['name']}"
     body_lines = [
-        f"Page: {page_context}",
-        f"Name: {name or '(not given)'}",
-        f"Reply-to: {contact_email or '(not given)'}",
+        f"Name: {record['name']}",
+        f"Contact email: {record['contact_email'] or '(not provided)'}",
+        f"Page: {page_context or '(not specified)'}",
         "",
         "Description:",
         description,
     ]
     body = "\n".join(body_lines)
-    query = urllib.parse.urlencode({"subject": subject, "body": body})
-    return f"mailto:{DEVELOPER_EMAIL}?{query}"
-
-
-def save_report(name, contact_email, description, page_context):
-    """
-    name: str, optional
-    contact_email: str, optional
-    description: str, required (caller already validates non-empty)
-    page_context: str, one of the Help-page selectbox options
-
-    Returns (record, mailto_url).
-    """
-    _ensure_dirs()
-
-    record = {
-        "id": time.strftime("%Y%m%d_%H%M%S") + f"_{len(load_reports())}",
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "name": name or "Anonymous",
-        "contact_email": contact_email or "",
-        "page_context": page_context,
-        "description": description,
-    }
-
-    reports = load_reports()
-    reports.insert(0, record)  # newest first
-    _save_index(reports)
-
-    mailto_url = _build_mailto(name, contact_email, description, page_context)
+    mailto_url = (
+        f"mailto:{DEVELOPER_EMAIL}"
+        f"?subject={urllib.parse.quote(subject)}"
+        f"&body={urllib.parse.quote(body)}"
+    )
     return record, mailto_url
