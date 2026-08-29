@@ -178,11 +178,11 @@ st.markdown(
         color: white; box-shadow: 0 8px 22px rgba(30,58,95,0.28);
     }
     .bl-hero h1 { color: white; margin: 0 0 8px 0; font-size: 2rem; }
-    .bl-hero p { color: rgba(255,255,255,0.9); margin: 0; font-size: 1.03rem; line-height: 1.55; }
+    .bl-hero p { color: rgba(255,255,255,0.9) !important; margin: 0; font-size: 1.03rem; line-height: 1.55; }
     .bl-chips { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
     .bl-chip {
         background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.26);
-        border-radius: 999px; padding: 4px 12px; font-size: 0.76rem; color: white;
+        border-radius: 999px; padding: 4px 12px; font-size: 0.76rem; color: white !important;
     }
 
     .bl-tile {
@@ -190,9 +190,9 @@ st.markdown(
         padding: 16px 18px; height: 100%;
     }
     .bl-tile h4 { margin: 0 0 6px 0; font-size: 1rem; color: #1e3a5f; }
-    .bl-tile p { margin: 0; font-size: 0.9rem; color: #475569; line-height: 1.5; }
+    .bl-tile p { margin: 0; font-size: 0.9rem; color: #475569 !important; line-height: 1.5; }
 
-    .bl-caption { font-size: 0.83rem; color: #475569; text-align: center; margin-top: 6px; }
+    .bl-caption { font-size: 0.83rem; color: #475569 !important; text-align: center; margin-top: 6px; }
     div[data-testid="stImage"] img { border-radius: 10px; border: 1px solid rgba(30,58,95,0.12); }
 
     div[role="radiogroup"] {
@@ -207,8 +207,8 @@ st.markdown(
         padding: 22px 26px; margin: 8px 0 16px 0; text-align: center;
     }
     .bl-scorebox .who { color: #475569; font-size: 0.82rem; font-weight: 700; letter-spacing: 0.05em; }
-    .bl-scorebox .num { font-size: 3.1rem; font-weight: 700; color: #1e3a5f; line-height: 1; }
-    .bl-scorebox .max { font-size: 1.05rem; color: #475569; font-weight: 500; }
+    .bl-scorebox .num { font-size: 3.1rem; font-weight: 700; color: #1e3a5f !important; line-height: 1; }
+    .bl-scorebox .max { font-size: 1.05rem; color: #475569 !important; font-weight: 500; }
     .bl-scorebox .tag { display: inline-block; margin-top: 8px; padding: 4px 14px; border-radius: 999px; font-size: 0.83rem; font-weight: 600; }
 
     .bl-label {
@@ -216,6 +216,76 @@ st.markdown(
         color: #475569; margin: 16px 0 6px 0;
     }
     .bl-foot { text-align: center; color: #64748b; font-size: 0.78rem; margin-top: 36px; }
+
+    /* ---------------------------------------------------------------
+       Force light, readable styling on native Streamlit widgets. The
+       platform's own default component colors have been rendering dark
+       (buttons, inputs, plain text) regardless of page background or
+       theme config, so these are pinned explicitly instead of relying
+       on defaults. :where() keeps the broad text-color reset at zero
+       specificity so the specific .bl-* rules above always win without
+       depending on source order (this is what keeps white hero/chip
+       text from getting caught by the same reset).
+       --------------------------------------------------------------- */
+    :where(
+        .stMarkdown p, .stMarkdown li, .stMarkdown span,
+        div[data-testid="stCaptionContainer"] p,
+        div[data-testid="stCaptionContainer"] span,
+        div[data-testid="stWidgetLabel"] p,
+        div[data-testid="stMetricLabel"] p,
+        div[data-testid="stMetricValue"],
+        div[role="radiogroup"] label p,
+        div[role="radiogroup"] label span
+    ) { color: #1e293b !important; }
+
+    button[kind="secondary"] {
+        background-color: #ffffff !important;
+        color: #1e293b !important;
+        border: 1px solid rgba(30,58,95,0.35) !important;
+    }
+    button[kind="secondary"]:hover {
+        background-color: #f1f5f9 !important;
+        border-color: #1e3a5f !important;
+        color: #1e3a5f !important;
+    }
+    button[kind="secondary"] p { color: inherit !important; }
+
+    button[kind="primary"] {
+        background-color: #e15b4f !important;
+        border-color: #e15b4f !important;
+        color: #ffffff !important;
+    }
+    button[kind="primary"]:hover {
+        background-color: #c94b40 !important;
+        border-color: #c94b40 !important;
+    }
+    button[kind="primary"] p { color: #ffffff !important; }
+
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] {
+        background-color: #ffffff !important;
+        color: #1e293b !important;
+        border-color: rgba(30,58,95,0.25) !important;
+    }
+
+    div[data-testid="stFileUploaderDropzone"] {
+        background-color: #ffffff !important;
+        border: 1px dashed rgba(30,58,95,0.3) !important;
+    }
+    div[data-testid="stFileUploaderDropzone"] * { color: #1e293b !important; }
+    div[data-testid="stFileUploaderDropzone"] button {
+        background-color: #1e293b !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+    div[data-testid="stFileUploaderDropzone"] button * { color: #ffffff !important; }
+    div[data-testid="stFileUploaderFile"] {
+        background-color: #f8fafc !important;
+        color: #1e293b !important;
+    }
+    div[data-testid="stFileUploaderFile"] * { color: #1e293b !important; }
     </style>
     """,
     unsafe_allow_html=True,
