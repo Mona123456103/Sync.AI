@@ -191,7 +191,7 @@ st.markdown(
     .bl-tile h4 { margin: 0 0 6px 0; font-size: 1rem; color: #1e3a5f; }
     .bl-tile p { margin: 0; font-size: 0.9rem; color: #475569; line-height: 1.5; }
 
-    .bl-caption { font-size: 0.83rem; color: #64748b; text-align: center; margin-top: 6px; }
+    .bl-caption { font-size: 0.83rem; color: #475569; text-align: center; margin-top: 6px; }
     div[data-testid="stImage"] img { border-radius: 10px; border: 1px solid rgba(30,58,95,0.12); }
 
     div[role="radiogroup"] {
@@ -205,16 +205,16 @@ st.markdown(
         border: 1px solid rgba(30,58,95,0.16); border-radius: 14px;
         padding: 22px 26px; margin: 8px 0 16px 0; text-align: center;
     }
-    .bl-scorebox .who { color: #64748b; font-size: 0.82rem; font-weight: 700; letter-spacing: 0.05em; }
+    .bl-scorebox .who { color: #475569; font-size: 0.82rem; font-weight: 700; letter-spacing: 0.05em; }
     .bl-scorebox .num { font-size: 3.1rem; font-weight: 700; color: #1e3a5f; line-height: 1; }
-    .bl-scorebox .max { font-size: 1.05rem; color: #64748b; font-weight: 500; }
+    .bl-scorebox .max { font-size: 1.05rem; color: #475569; font-weight: 500; }
     .bl-scorebox .tag { display: inline-block; margin-top: 8px; padding: 4px 14px; border-radius: 999px; font-size: 0.83rem; font-weight: 600; }
 
     .bl-label {
         font-size: 0.76rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-        color: #64748b; margin: 16px 0 6px 0;
+        color: #475569; margin: 16px 0 6px 0;
     }
-    .bl-foot { text-align: center; color: #94a3b8; font-size: 0.78rem; margin-top: 36px; }
+    .bl-foot { text-align: center; color: #64748b; font-size: 0.78rem; margin-top: 36px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -446,11 +446,11 @@ def deliver_result(label, video_path, csv_path, landmarks):
 def score_band(score):
     if score >= 9.5: return "Excellent", "#0f766e", "#ecfdf5"
     if score >= 8.5: return "Very good", "#1e3a5f", "#eef4fb"
-    if score >= 7.5: return "Good", "#2563eb", "#eff6ff"
-    if score >= 6.5: return "Competent", "#7c3aed", "#f5f3ff"
-    if score >= 5.5: return "Satisfactory", "#d97706", "#fffbeb"
-    if score >= 4.5: return "Deficient", "#dc2626", "#fef2f2"
-    return "Weak", "#991b1b", "#fef2f2"
+    if score >= 7.5: return "Good", "#1d4ed8", "#eff6ff"
+    if score >= 6.5: return "Competent", "#6d28d9", "#f5f3ff"
+    if score >= 5.5: return "Satisfactory", "#92400e", "#fffbeb"
+    if score >= 4.5: return "Deficient", "#b91c1c", "#fef2f2"
+    return "Weak", "#7f1d1d", "#fef2f2"
 
 
 def render_score(above_csv, below_csv=None, swimmer_name="figure"):
