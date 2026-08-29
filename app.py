@@ -1,36 +1,48 @@
 #!/usr/bin/env python3
 """
-Sync.AI — Web App
+Barracuda Lens — web front-end for tracker_core.py + scorer.py
 ===========================================================================
-Streamlit front-end for tracker_core.py + scorer.py.
+Four views, switched via a `?page=` query param (kept simple and
+version-portable rather than depending on newer st.navigation APIs):
 
-Pages (session_state-based routing, no reliance on newer st.navigation
-APIs, so this works across Streamlit versions):
-  - Home     : landing page, explains the product, links to Analyze
-  - Analyze  : the actual tracking + scoring workflow (Walticam /
-               Just Above / Above + Below)
-  - History  : previously scored sessions
-  - Help     : report an issue
+    home     landing page — what this does and why
+    analyze  upload + track + score a figure
+    history  past sessions, saved by session_store.py
+    help     report a problem
+
+Tracking speed is intentionally NOT user-configurable here — every run
+uses FAST_SETTINGS below. See the comment on that constant for why.
 
 Run locally:
     streamlit run app.py
 """
 
-import streamlit as st
-import tempfile
-import pandas as pd
 import io
 import zipfile
 from pathlib import Path
 
+import pandas as pd
+import streamlit as st
+
+import issue_reports
+import session_store
 import tracker_core as tc
 from scorer import BarracudaScorer
-import session_store
-import issue_reports
 
-APP_NAME = "Sync.AI"
+APP_NAME = "Barracuda Lens"
 APP_DIR = Path(__file__).resolve().parent
 
+# Tracking always runs at this setting — it's not exposed as a control.
+# "lightweight" mode + det_frequency=4 is the fast end of what rtmlib
+# supports; this keeps a figure processing in well under a minute on
+# shared CPU hardware instead of several minutes. Nothing downstream
+# reads a different value, so changing this one constant is enough if
+# that trade-off ever needs revisiting.
+FAST_SETTINGS = {"mode": "lightweight", "det_frequency": 4}
+MAX_CLIP_SECONDS = 60
+
+# Labels for the deduction categories, used in the History page's
+# progress panel.
 DEDUCTION_LABELS = {
     "ascent_alignment": "Ascent alignment",
     "descent_alignment": "Descent alignment",
@@ -43,42 +55,11 @@ DEDUCTION_LABELS = {
     "head_tuck": "Head tuck",
 }
 
-# Speed fix — loading the pose model is the single biggest cost in this
-# app, and it was happening from scratch on EVERY "Process video" click,
-# even for the second, third, tenth video of the same session, and TWICE
-# per click for Above+Below mode (once for the above tracker, once for
-# underwater — same model, same settings, loaded independently). Cached
-# with st.cache_resource, which is Streamlit's standard mechanism for
-# exactly this — expensive objects (ML models, DB connections) that
-# should be built once and reused across reruns/videos within the same
-# running app, not once per interaction.
-#
-# above_below_role is only used to give Walticam's above/below trackers
-# SEPARATE cached instances rather than one shared one — they're called
-# interleaved (alternating every single frame in the tracking loop), and
-# reusing one live model object across rapidly alternating calls on
-# unrelated image regions isn't something verifiable without the actual
-# rtmlib library, so this stays cautious there specifically. The
-# non-Walticam Above/Below path calls its two trackers sequentially (one
-# fully finishes before the other starts), which is a much lower-risk
-# reuse pattern, so those two safely share one cached instance.
-@st.cache_resource(show_spinner=False)
-def _cached_pose_tracker(mode, det_frequency):
-    return tc.make_pose_tracker(mode, det_frequency)
-
-
-@st.cache_resource(show_spinner=False)
-def _cached_pose_tracker_halpe(mode, det_frequency, above_below_role):
-    return tc.make_pose_tracker_halpe(mode, det_frequency)
-
-
-# Files bundled into the "download this app" zip on the Home page, so
-# someone can run their own copy with none of the shared hosted app's
-# resource limits (see the concurrent-users discussion this came out of).
-# packages.txt is deliberately NOT included — that file is only for the
-# hosted Streamlit Community Cloud environment's Linux system packages,
-# not needed for a local Windows/Mac/Linux setup.
-SOURCE_FILES_FOR_DOWNLOAD = [
+# Everything a from-scratch local install needs, bundled by the
+# "download this app" button on the Home page. packages.txt is left out
+# on purpose — it's Linux system packages for the hosted deployment
+# only, not something a local Windows/Mac/Linux setup needs.
+LOCAL_COPY_FILES = [
     "app.py",
     "tracker_core.py",
     "scorer.py",
@@ -91,837 +72,717 @@ SOURCE_FILES_FOR_DOWNLOAD = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
 @st.cache_data(show_spinner=False)
-def _build_source_zip():
-    """Zips up everything needed to run this app on someone else's own
-    computer, read directly from the files sitting next to this script —
-    so the download always matches whatever's actually deployed, not a
-    stale hand-copied version. Any listed file that doesn't exist yet
-    (e.g. before LOCAL_SETUP.md has been added to the repo) is skipped
-    rather than failing the whole zip."""
-    buffer = io.BytesIO()
+def _local_copy_zip():
+    """Builds the downloadable zip straight from whatever's sitting next
+    to this script, so it can never drift out of sync with what's
+    actually deployed. Missing optional files (e.g. no LOCAL_SETUP.md
+    yet) are skipped rather than failing the zip."""
+    buf = io.BytesIO()
     included = []
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for filename in SOURCE_FILES_FOR_DOWNLOAD:
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in LOCAL_COPY_FILES:
             path = APP_DIR / filename
             if path.exists():
                 zf.write(path, arcname=filename)
                 included.append(filename)
-    buffer.seek(0)
-    return buffer.getvalue(), included
+    buf.seek(0)
+    return buf.getvalue(), included
 
 
-def render_download_source_control():
-    zip_bytes, included_files = _build_source_zip()
+def local_copy_button():
+    zip_bytes, included = _local_copy_zip()
     st.download_button(
-        "Download this app to run on your own computer",
+        "Download a copy to run on your own machine",
         data=zip_bytes,
-        file_name="sync-ai-source.zip",
+        file_name="barracuda-lens.zip",
         mime="application/zip",
         use_container_width=True,
         type="primary",
     )
-    if "LOCAL_SETUP.md" in included_files:
+    if "LOCAL_SETUP.md" in included:
         st.caption(
-            "Includes a step-by-step setup guide (LOCAL_SETUP.md inside "
-            "the zip) — no coding experience needed. Running your own "
-            "copy means no waiting on anyone else and no shared resource "
-            "limits."
+            "Includes a setup guide (LOCAL_SETUP.md in the zip). Your own "
+            "copy isn't sharing CPU with anyone else's uploads."
         )
     else:
         st.caption(
-            "Running your own copy means no waiting on anyone else and no "
-            "shared resource limits. You'll need Python installed — "
-            "`pip install -r requirements.txt` then `streamlit run app.py`."
+            "Your own copy isn't sharing CPU with anyone else's uploads. "
+            "You'll need Python: `pip install -r requirements.txt`, then "
+            "`streamlit run app.py`."
         )
 
 
-st.set_page_config(
-    page_title=APP_NAME,
-    layout="centered",
-)
+def figure_image(col, filename, caption):
+    path = APP_DIR / filename
+    with col:
+        if path.exists():
+            st.image(str(path), use_container_width=True)
+            st.markdown(f'<p class="bl-caption">{caption}</p>', unsafe_allow_html=True)
+        else:
+            st.warning(f"{filename} isn't in the app folder yet ({APP_DIR}).")
 
-# ── Global visual styling (no emojis anywhere in this app) ────────────────
+
+@st.dialog("Filming tips")
+def filming_tips_dialog():
+    st.write(
+        "Camera angle matters more than almost anything else here. Shoot "
+        "level with the water rather than down at it — a downward angle "
+        "compresses how far the swimmer actually rises, and that rise is "
+        "exactly what the base score is built from."
+    )
+    c1, c2 = st.columns(2)
+    figure_image(c1, "camera_angle_guide.png", "Level with the waterline, not angled down.")
+    figure_image(c2, "framing_example.png", "Leave headroom above and below for the full rise and entry.")
+    if st.button("Close", type="primary"):
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Page shell
+# ---------------------------------------------------------------------------
+
+st.set_page_config(page_title=APP_NAME, layout="centered")
+
 st.markdown(
     """
     <style>
-    /* Fill the sides instead of leaving them stark white on wide screens */
     .stApp {
-        background: radial-gradient(circle at 12% 8%, rgba(8,145,178,0.05), transparent 45%),
-                    radial-gradient(circle at 88% 92%, rgba(14,116,144,0.05), transparent 45%),
-                    #fbfdfe;
+        background:
+            radial-gradient(circle at 10% 10%, rgba(30,58,95,0.05), transparent 45%),
+            radial-gradient(circle at 90% 90%, rgba(217,119,6,0.05), transparent 45%),
+            #fbfaf8;
     }
-    .block-container { padding-top: 4rem; padding-bottom: 3rem; max-width: 1040px; }
-    h1, h2, h3 { letter-spacing: -0.01em; }
+    .block-container { padding-top: 3.6rem; padding-bottom: 3rem; max-width: 1020px; }
 
-    /* Top bar */
-    .sa-topbar {
+    .bl-nav {
         display: flex; align-items: center; justify-content: space-between;
-        padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid rgba(120,120,120,0.18);
+        padding-bottom: 10px; margin-bottom: 10px;
+        border-bottom: 1px solid rgba(30,58,95,0.15);
     }
-    .sa-logo {
-        font-size: 2.4rem; font-weight: 800; letter-spacing: -0.03em; color: #0e7490;
-        line-height: 1.3; padding: 6px 0 10px 0; margin: 0;
-        display: inline-block; text-decoration: none; cursor: pointer;
+    .bl-wordmark {
+        font-size: 2.2rem; font-weight: 800; letter-spacing: -0.03em;
+        color: #1e3a5f; text-decoration: none; cursor: pointer;
     }
-    .sa-logo:hover { color: #0891b2; text-decoration: none; }
+    .bl-wordmark:hover { color: #2b5480; text-decoration: none; }
+    div[data-testid="column"]:has(.bl-wordmark) { padding-top: 6px; }
 
-    /* Nudge the nav buttons down so they line up with the bigger logo
-       instead of sitting above its vertical center */
-    div[data-testid="column"]:has(.sa-logo) { padding-top: 4px; }
-
-    /* Hero */
-    .sa-hero {
-        background: linear-gradient(135deg, #0891b2 0%, #0e7490 45%, #155e75 100%);
-        border-radius: 18px;
-        padding: 34px 32px;
-        margin: 10px 0 22px 0;
-        color: white;
-        box-shadow: 0 8px 24px rgba(8, 145, 178, 0.25);
+    .bl-hero {
+        background: linear-gradient(120deg, #1e3a5f 0%, #24476f 55%, #163150 100%);
+        border-radius: 16px; padding: 32px 30px; margin: 8px 0 20px 0;
+        color: white; box-shadow: 0 8px 22px rgba(30,58,95,0.28);
     }
-    .sa-hero h1 { color: white; margin: 0 0 8px 0; font-size: 2.1rem; }
-    .sa-hero p { color: rgba(255,255,255,0.92); margin: 0; font-size: 1.05rem; line-height: 1.5; }
-    .sa-badges { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .sa-badge {
-        background: rgba(255,255,255,0.16);
-        border: 1px solid rgba(255,255,255,0.28);
-        border-radius: 999px;
-        padding: 4px 12px;
-        font-size: 0.78rem;
-        color: white;
-        display: inline-block;
+    .bl-hero h1 { color: white; margin: 0 0 8px 0; font-size: 2rem; }
+    .bl-hero p { color: rgba(255,255,255,0.9); margin: 0; font-size: 1.03rem; line-height: 1.55; }
+    .bl-chips { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .bl-chip {
+        background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.26);
+        border-radius: 999px; padding: 4px 12px; font-size: 0.76rem; color: white;
     }
 
-    /* Feature cards */
-    .sa-card {
-        border: 1px solid rgba(120,120,120,0.18);
-        border-radius: 14px;
-        padding: 18px 20px;
-        height: 100%;
+    .bl-tile {
+        border: 1px solid rgba(30,58,95,0.15); border-radius: 12px;
+        padding: 16px 18px; height: 100%;
     }
-    .sa-card h4 { margin: 0 0 6px 0; font-size: 1.02rem; }
-    .sa-card p { margin: 0; font-size: 0.92rem; color: #475569; line-height: 1.5; }
+    .bl-tile h4 { margin: 0 0 6px 0; font-size: 1rem; color: #1e3a5f; }
+    .bl-tile p { margin: 0; font-size: 0.9rem; color: #475569; line-height: 1.5; }
 
-    /* Filming-tip images */
-    .sa-fig-caption { font-size: 0.85rem; color: #64748b; text-align: center; margin-top: 6px; }
-    div[data-testid="stImage"] img { border-radius: 12px; border: 1px solid rgba(120,120,120,0.15); }
+    .bl-caption { font-size: 0.83rem; color: #64748b; text-align: center; margin-top: 6px; }
+    div[data-testid="stImage"] img { border-radius: 10px; border: 1px solid rgba(30,58,95,0.12); }
 
-    /* Segmented control */
     div[role="radiogroup"] {
-        display: flex; gap: 4px; background: rgba(120,120,120,0.12);
+        display: flex; gap: 4px; background: rgba(30,58,95,0.08);
         padding: 4px; border-radius: 999px; width: fit-content;
     }
-    div[role="radiogroup"] label { border-radius: 999px !important; padding: 6px 20px !important; margin: 0 !important; }
+    div[role="radiogroup"] label { border-radius: 999px !important; padding: 6px 18px !important; margin: 0 !important; }
 
-    /* Score card */
-    .sa-score-card {
-        background: linear-gradient(180deg, rgba(8,145,178,0.06) 0%, rgba(8,145,178,0.01) 100%);
-        border: 1px solid rgba(8,145,178,0.18);
-        border-radius: 16px;
-        padding: 24px 28px;
-        margin: 8px 0 18px 0;
-        text-align: center;
+    .bl-scorebox {
+        background: linear-gradient(180deg, rgba(30,58,95,0.06) 0%, rgba(30,58,95,0.01) 100%);
+        border: 1px solid rgba(30,58,95,0.16); border-radius: 14px;
+        padding: 22px 26px; margin: 8px 0 16px 0; text-align: center;
     }
-    .sa-score-number { font-size: 3.2rem; font-weight: 700; color: #0e7490; line-height: 1; }
-    .sa-score-max { font-size: 1.1rem; color: #64748b; font-weight: 500; }
-    .sa-score-assessment {
-        display: inline-block; margin-top: 10px; padding: 4px 14px;
-        border-radius: 999px; font-size: 0.85rem; font-weight: 600;
-    }
+    .bl-scorebox .who { color: #64748b; font-size: 0.82rem; font-weight: 700; letter-spacing: 0.05em; }
+    .bl-scorebox .num { font-size: 3.1rem; font-weight: 700; color: #1e3a5f; line-height: 1; }
+    .bl-scorebox .max { font-size: 1.05rem; color: #64748b; font-weight: 500; }
+    .bl-scorebox .tag { display: inline-block; margin-top: 8px; padding: 4px 14px; border-radius: 999px; font-size: 0.83rem; font-weight: 600; }
 
-    .sa-section-label {
-        font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em;
-        text-transform: uppercase; color: #64748b; margin: 18px 0 6px 0;
+    .bl-label {
+        font-size: 0.76rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+        color: #64748b; margin: 16px 0 6px 0;
     }
-
-    .sa-footer { text-align: center; color: #94a3b8; font-size: 0.8rem; margin-top: 40px; }
+    .bl-foot { text-align: center; color: #94a3b8; font-size: 0.78rem; margin-top: 36px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ── Page routing ────────────────────────────────────────────────────────
-# Uses the URL's ?page= query param as the source of truth, so a plain
-# HTML link (like the logo below) can navigate with a normal click/reload
-# instead of needing a Python callback wired to it.
-_valid_pages = {"home", "analyze", "history", "help"}
-_qp_page = st.query_params.get("page")
-
+_pages = {"home", "analyze", "history", "help"}
+_from_url = st.query_params.get("page")
 if "page" not in st.session_state:
-    st.session_state.page = _qp_page if _qp_page in _valid_pages else "home"
-elif _qp_page in _valid_pages and _qp_page != st.session_state.page:
-    st.session_state.page = _qp_page
+    st.session_state.page = _from_url if _from_url in _pages else "home"
+elif _from_url in _pages and _from_url != st.session_state.page:
+    st.session_state.page = _from_url
 
 
-def go_to(page_name):
-    st.session_state.page = page_name
-    st.query_params["page"] = page_name
+def go(page):
+    st.session_state.page = page
+    st.query_params["page"] = page
 
 
-# ── Top bar (present on every page) ────────────────────────────────────
-top_left, top_a, top_b, top_c = st.columns([5, 1.4, 1.4, 1.2])
-with top_left:
-    st.markdown(
-        f'<a href="?page=home" target="_self" class="sa-logo">{APP_NAME}</a>',
-        unsafe_allow_html=True,
-    )
-with top_a:
+nav_logo, nav_a, nav_b, nav_c = st.columns([5, 1.4, 1.4, 1.2])
+with nav_logo:
+    st.markdown(f'<a href="?page=home" target="_self" class="bl-wordmark">{APP_NAME}</a>', unsafe_allow_html=True)
+with nav_a:
     if st.button("Analyze", use_container_width=True, type="primary" if st.session_state.page == "analyze" else "secondary"):
-        go_to("analyze")
-with top_b:
+        go("analyze")
+with nav_b:
     if st.button("History", use_container_width=True, type="primary" if st.session_state.page == "history" else "secondary"):
-        go_to("history")
-with top_c:
+        go("history")
+with nav_c:
     if st.button("Help", use_container_width=True, type="primary" if st.session_state.page == "help" else "secondary"):
-        go_to("help")
-st.markdown('<div class="sa-topbar"></div>', unsafe_allow_html=True)
+        go("help")
+st.markdown('<div class="bl-nav"></div>', unsafe_allow_html=True)
 
 
-# ── Shared: filming-guide images + popup, used from both Home and Analyze ──
-def _show_figure(col, filename, caption):
-    path = APP_DIR / filename
-    with col:
-        if path.exists():
-            st.image(str(path), use_container_width=True)
-            st.markdown(f'<div class="sa-fig-caption">{caption}</div>', unsafe_allow_html=True)
-        else:
-            st.warning(
-                f"Image not found: {filename}. It needs to sit in the same "
-                f"folder as app.py in the repo (looked in: {APP_DIR})."
-            )
+# ---------------------------------------------------------------------------
+# Home
+# ---------------------------------------------------------------------------
 
-
-@st.dialog("How should I film this?")
-def show_filming_guide_dialog():
-    st.write(
-        "Camera angle is the single biggest factor in tracking accuracy. "
-        "Shoot from eye level with the water, not from above looking "
-        "down — a downward angle foreshortens the swimmer's rise out of "
-        "the water, which throws off the height measurement the base "
-        "score depends on."
-    )
-    dcol1, dcol2 = st.columns(2)
-    _show_figure(dcol1, "camera_angle_guide.png", "Shoot level with the water, not down at it.")
-    _show_figure(
-        dcol2, "framing_example.png",
-        "Keep the swimmer centered with clear space above and below for the full rise and entry.",
-    )
-    if st.button("Got it", type="primary"):
-        st.rerun()
-
-
-# ============================================================================
-# HOME PAGE
-# ============================================================================
-def render_home():
+def page_home():
     st.markdown(
         f"""
-        <div class="sa-hero">
+        <div class="bl-hero">
             <h1>{APP_NAME}</h1>
             <p>
-                Judging a barracuda figure by eye is fast, but it is also
-                inconsistent — the same swimmer can score differently
-                depending on the angle, the light, and which judge happens
-                to be watching that second. {APP_NAME} takes the exact same
-                footage a judge already sees and turns it into a
-                repeatable, explainable measurement: how high the swimmer
-                rose, how straight their line was on the way up and down,
-                how much their legs and ankles bent, and how their back
-                held shape — every one of those numbers, every time, from
-                the same video.
+                A judge scoring a barracuda figure live has one look, from
+                one angle, under whatever light the deck happens to have —
+                and two judges watching the same swimmer can still land on
+                different numbers. {APP_NAME} runs the same footage through
+                pose tracking instead: how high the swimmer rose, how
+                straight the line was going up and coming down, how bent
+                the legs and ankles were, how the back held its shape —
+                measured the same way, from the same video, every time.
             </p>
-            <div class="sa-badges">
-                <span class="sa-badge">AI pose tracking</span>
-                <span class="sa-badge">Above and underwater</span>
-                <span class="sa-badge">FINA-aligned scoring</span>
-                <span class="sa-badge">Kalman-smoothed data</span>
+            <div class="bl-chips">
+                <span class="bl-chip">Pose tracking</span>
+                <span class="bl-chip">Above &amp; underwater</span>
+                <span class="bl-chip">FINA-aligned scoring</span>
+                <span class="bl-chip">Kalman-smoothed data</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         if st.button("Analyze a video", type="primary", use_container_width=True):
-            go_to("analyze")
-    with col2:
-        if st.button("See past results", use_container_width=True):
-            go_to("history")
+            go("analyze")
+    with c2:
+        if st.button("Browse past sessions", use_container_width=True):
+            go("history")
 
-    st.markdown('<div class="sa-section-label">Why this matters</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bl-label">Why bother automating this</div>', unsafe_allow_html=True)
     st.write(
-        "A coach reviewing footage after a meet is doing the same thing "
-        "over and over by eye: rewinding, guessing degrees, comparing "
-        "memory of one swimmer against another. That does not scale past "
-        "a handful of swimmers, and it is not something a swimmer can use "
-        "on their own between practices. A tool that reads the same "
-        "footage and reports the same measurements every time gives "
-        "coaches a second opinion they can trust, and gives swimmers "
-        "something concrete to work on — not \"looked a little off\" but "
-        "\"your ascent was tilted eight degrees, here is the frame where "
-        "it happened.\""
+        "Reviewing footage by eye means rewinding the same clip, guessing "
+        "at angles, and comparing swimmers from memory — it doesn't scale "
+        "past a handful of athletes, and a swimmer can't really do it on "
+        "their own between practices. Reading the same numbers off the "
+        "same footage every time gives a coach a second opinion worth "
+        "trusting, and gives a swimmer something concrete to fix instead "
+        "of \"that looked a bit off\" — an actual tilt in degrees, and the "
+        "frame it happened on."
     )
 
-    st.markdown('<div class="sa-section-label">How it works</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bl-label">How a video becomes a score</div>', unsafe_allow_html=True)
     steps = [
-        ("Upload footage", "A single WaltiCam split-screen video, or separate above-water and underwater clips — whatever you have."),
-        ("AI tracks the swimmer", "A pose-detection model finds and locks onto the swimmer frame by frame, rejecting background people, reflections, and pool-deck noise along the way."),
-        ("The figure gets measured", "Waterline, jump height, body alignment, backpike, leg and ankle extension, back roundness, and more — all extracted directly from the tracked joints."),
-        ("A score comes back", "A FINA-aligned base score from height, minus deductions for each technical category, plus a clear breakdown of exactly where points were lost."),
+        ("Upload footage", "One WaltiCam split-screen clip, or separate above-water / underwater clips — whatever you filmed with."),
+        ("The swimmer gets tracked", "A pose model follows the swimmer frame by frame, filtering out background people, reflections, and pool-deck clutter."),
+        ("The figure gets measured", "Waterline, jump height, alignment on the way up and down, backpike, leg and ankle extension, back shape — pulled straight from the tracked joints."),
+        ("A score comes back", "A height-based base score, minus deductions per category, with the full breakdown shown — not just the final number."),
     ]
     for i, (title, body) in enumerate(steps, start=1):
-        c1, c2 = st.columns([0.6, 6])
-        with c1:
+        sc1, sc2 = st.columns([0.5, 6])
+        with sc1:
             st.markdown(f"**{i}**")
-        with c2:
+        with sc2:
             st.markdown(f"**{title}**  \n{body}")
 
-    st.markdown('<div class="sa-section-label">Camera setup that actually works</div>', unsafe_allow_html=True)
-    if st.button("How should I film this?", type="primary"):
-        show_filming_guide_dialog()
+    st.markdown('<div class="bl-label">Getting the camera right</div>', unsafe_allow_html=True)
+    if st.button("Filming tips", type="primary"):
+        filming_tips_dialog()
     st.write(
-        "Tracking accuracy starts before the video is even uploaded. The "
-        "single biggest factor is camera angle: shoot from eye level, not "
-        "from above looking down. A downward angle foreshortens the "
-        "swimmer's rise out of the water, which throws off exactly the "
-        "height measurement the base score depends on — a horizontal, "
-        "eye-level camera keeps that rise measurable and consistent."
+        "Camera angle is the single biggest factor in how accurate the "
+        "tracking ends up. Shoot level with the water, not down at it — a "
+        "downward angle foreshortens the rise out of the water, which is "
+        "exactly the measurement the base score depends on."
     )
-    img_col1, img_col2 = st.columns(2)
-    _show_figure(img_col1, "camera_angle_guide.png", "Shoot level with the water, not down at it.")
-    _show_figure(
-        img_col2, "framing_example.png",
-        "Keep the swimmer centered with clear space above and below for the full rise and entry.",
-    )
+    ic1, ic2 = st.columns(2)
+    figure_image(ic1, "camera_angle_guide.png", "Level with the waterline, not angled down.")
+    figure_image(ic2, "framing_example.png", "Leave headroom above and below for the full rise and entry.")
 
-    st.markdown('<div class="sa-section-label">Built for how you actually film</div>', unsafe_allow_html=True)
-    fcol1, fcol2, fcol3 = st.columns(3)
-    with fcol1:
+    st.markdown('<div class="bl-label">Whatever footage you have</div>', unsafe_allow_html=True)
+    t1, t2, t3 = st.columns(3)
+    with t1:
         st.markdown(
-            """<div class="sa-card"><h4>WaltiCam</h4>
-            <p>One split-screen video, above and below in the same frame.
-            Tracked with a dedicated model that reads real heel, toe, and
-            neck positions, and scored with a height calibration built
-            specifically for a split-frame camera's narrower field of
-            view.</p></div>""",
+            """<div class="bl-tile"><h4>WaltiCam</h4>
+            <p>One split-screen clip, above and below at once — tracked
+            by two trackers running side by side on the same video.</p></div>""",
             unsafe_allow_html=True,
         )
-    with fcol2:
+    with t2:
         st.markdown(
-            """<div class="sa-card"><h4>Above water only</h4>
-            <p>Just a single above-water camera. Tracked with a model
-            tuned for a full, dedicated view of the swimmer, with tent and
-            pool-deck masking built in so background people cannot get
-            mistaken for the swimmer.</p></div>""",
+            """<div class="bl-tile"><h4>Above water only</h4>
+            <p>A single above-water camera, with tent and pool-deck
+            masking so background people don't get mistaken for the
+            swimmer.</p></div>""",
             unsafe_allow_html=True,
         )
-    with fcol3:
+    with t3:
         st.markdown(
-            """<div class="sa-card"><h4>Above and below</h4>
-            <p>Both cameras, tracked separately. The official score comes
-            from the above-water footage, and the underwater footage adds
-            coaching-only feedback — details like a bent knee mid-figure
-            that a judge on deck would never get to see.</p></div>""",
+            """<div class="bl-tile"><h4>Above and below</h4>
+            <p>Both cameras, tracked separately. The score always comes
+            from the above-water footage; the underwater clip adds
+            coaching notes a judge on deck would never see.</p></div>""",
             unsafe_allow_html=True,
         )
 
-    st.markdown('<div class="sa-section-label">What gets measured</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bl-label">What actually gets measured</div>', unsafe_allow_html=True)
     st.write(
         "Ascent and descent alignment, backpike, leg extension, ankle "
         "extension, back roundness, travel, and unroll speed all count "
-        "toward the official score, blended between a fixed technical "
-        "standard and how the figure compares to others scored in the "
-        "same batch. Head tuck and back-layout depth are measured but not "
-        "yet counted, pending exact judging criteria — nothing is hidden, "
-        "every measured number is shown, whether or not it currently "
-        "affects the score."
+        "toward the score. Head tuck is measured but not yet counted — "
+        "there's no calibrated threshold for it yet — and it's still "
+        "shown rather than hidden. The base height score currently comes "
+        "from how far the ankles clear the waterline as a fraction of the "
+        "frame, which is sensitive to how far back the camera was set up; "
+        "a body-length-normalized version of that same measurement is "
+        "shown in the debug panel for comparison, but isn't wired into "
+        "the score yet."
     )
 
-    st.markdown('<div class="sa-section-label">Run it without the wait</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bl-label">Skip the shared server</div>', unsafe_allow_html=True)
     st.write(
-        "This hosted version runs on shared, resource-limited servers — "
-        "usually fine, but only one person can really process a video at "
-        "a time, and heavy use can slow it down for everyone. Running "
-        "your own copy on your own computer sidesteps that completely: "
-        "no sharing, no limits, and your session history actually sticks "
-        "around instead of disappearing if the hosted app goes to sleep."
+        "This hosted version runs on shared, limited hardware — fine for "
+        "one video at a time, slower if several people are using it at "
+        "once. Running your own copy sidesteps that: no queue, no shared "
+        "limits, and session history that doesn't vanish when a free "
+        "hosted instance goes to sleep."
     )
-    render_download_source_control()
+    local_copy_button()
 
     if st.button("Start analyzing", type="primary"):
-        go_to("analyze")
+        go("analyze")
 
 
-# ============================================================================
-# ANALYZE PAGE
-# ============================================================================
-def render_model_preload_control():
-    """Lets the user trigger the slow one-time model load ahead of time
-    (e.g. while they're still getting their video ready), instead of it
-    always landing on whichever video they process first. Calls the same
-    cached factory functions the actual processing calls use, so once
-    warmed here, processing a video afterward reuses the exact same
-    loaded model with zero extra load time."""
-    if st.session_state.get("models_preloaded"):
-        st.success("Pose model loaded and ready.")
+# ---------------------------------------------------------------------------
+# Analyze
+# ---------------------------------------------------------------------------
+
+def warm_up_control():
+    """The pose model's weights take about a minute to download the
+    first time rtmlib needs them in a session. This just triggers that
+    download ahead of time so it doesn't land on whichever video gets
+    processed first — it does NOT keep a tracker object alive for reuse,
+    since tracker_core builds its own tracker per video; it only makes
+    sure the weight files are already on disk by the time that happens."""
+    if st.session_state.get("model_warmed"):
+        st.success("Pose model weights are already downloaded for this session.")
         return
 
-    col1, col2 = st.columns([3, 2])
-    with col1:
+    c1, c2 = st.columns([3, 2])
+    with c1:
         st.caption(
-            "The pose model takes about a minute to load the first time "
-            "it's used in a session. Load it now if you'd rather not wait "
-            "once you're ready to process a video — if it's already warm "
-            "from a recent video on this app, this will be quick instead."
+            "First use of the pose model in a session downloads its "
+            "weights (about a minute). Warm it up now if you'd rather not "
+            "wait once your video is ready."
         )
-    with col2:
-        if st.button("Load pose model now", use_container_width=True):
-            with st.spinner("Loading pose model..."):
-                _cached_pose_tracker("lightweight", 4)
-                _cached_pose_tracker_halpe("lightweight", 4, "above")
-                _cached_pose_tracker_halpe("lightweight", 4, "below")
-            st.session_state.models_preloaded = True
+    with c2:
+        if st.button("Warm up model", use_container_width=True):
+            with st.spinner("Downloading pose model weights..."):
+                tc.make_pose_tracker(FAST_SETTINGS["mode"], FAST_SETTINGS["det_frequency"])
+            st.session_state.model_warmed = True
             st.rerun()
 
 
-def render_analyze():
-    st.markdown('<div class="sa-section-label">Analyze</div>', unsafe_allow_html=True)
-    top_row1, top_row2 = st.columns([4, 2])
-    with top_row1:
+def progress_tracker(label):
+    bar = st.progress(0.0, text=f"Starting {label}...")
+
+    def update(frame_count, total_frames):
+        if total_frames > 0:
+            pct = min(frame_count / total_frames, 1.0)
+            frames_left = max(total_frames - frame_count, 0)
+            bar.progress(pct, text=f"{label}: {frames_left} frame(s) left")
+
+    return bar, update
+
+
+def deliver_result(label, video_path, csv_path, landmarks):
+    kalman_csv = tc.apply_kalman_filter_to_csv(csv_path, landmarks)
+    st.success(f"{label} processing complete.")
+    st.video(str(video_path))
+    c1, c2 = st.columns(2)
+    with c1:
+        with open(video_path, "rb") as f:
+            st.download_button(
+                f"Download {label} video", data=f.read(),
+                file_name=Path(video_path).name, mime="video/mp4",
+                use_container_width=True, key=f"video_{label}",
+            )
+    with c2:
+        with open(kalman_csv, "rb") as f:
+            st.download_button(
+                f"Download {label} data (CSV)", data=f.read(),
+                file_name=Path(kalman_csv).name, mime="text/csv",
+                use_container_width=True, key=f"csv_{label}",
+            )
+    return kalman_csv
+
+
+def score_band(score):
+    if score >= 9.5: return "Excellent", "#0f766e", "#ecfdf5"
+    if score >= 8.5: return "Very good", "#1e3a5f", "#eef4fb"
+    if score >= 7.5: return "Good", "#2563eb", "#eff6ff"
+    if score >= 6.5: return "Competent", "#7c3aed", "#f5f3ff"
+    if score >= 5.5: return "Satisfactory", "#d97706", "#fffbeb"
+    if score >= 4.5: return "Deficient", "#dc2626", "#fef2f2"
+    return "Weak", "#991b1b", "#fef2f2"
+
+
+def render_score(above_csv, below_csv=None, swimmer_name="figure"):
+    try:
+        result = BarracudaScorer.score_single_pair(above_csv, below_csv, name=swimmer_name)
+    except Exception as e:
+        st.warning(f"Couldn't compute a score for this figure: {e}")
+        return None
+
+    st.markdown('<div class="bl-label">Result</div>', unsafe_allow_html=True)
+
+    score = result["score"]
+    tag, color, bg = score_band(score)
+    st.markdown(
+        f"""
+        <div class="bl-scorebox">
+            <div class="who">{(swimmer_name or "FIGURE").upper()}</div>
+            <div><span class="num">{score:.2f}</span><span class="max"> / 10.0</span></div>
+            <div class="tag" style="color:{color}; background:{bg};">{tag}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2 = st.columns(2)
+    c1.metric("Base score (height)", f"{result['base_score']:.2f}")
+    c2.metric("Total deduction", f"-{result['total_deduction']:.2f}")
+
+    with st.expander("Debug info (what the height score is built from)"):
         st.write(
-            "Upload footage below. Each of the three modes uses its own "
-            "tracking model and its own height calibration — see the Home "
-            "page for why."
+            "The base score comes from foot clearance — how far the "
+            "ankles rise above the detected waterline, as a fraction of "
+            "the frame. A body-length-normalized version is shown here "
+            "too for reference; it isn't used for scoring yet."
         )
-    with top_row2:
-        if st.button("How should I film this?", use_container_width=True):
-            show_filming_guide_dialog()
+        st.json({
+            "frames": result.get("frames"),
+            "foot_clearance (frame-fraction)": result.get("foot_clearance"),
+            "foot_clearance_normalized (body-lengths)": result.get("foot_clearance_normalized"),
+            "body_scale (shoulder-to-ankle, px-frame-units)": result.get("body_scale"),
+            "base_score": result.get("base_score"),
+            "ascent_tilt_median (deg)": result.get("ascent_tilt_median"),
+            "descent_tilt_median (deg)": result.get("descent_tilt_median"),
+            "knee_angle_median (deg)": result.get("knee_angle_median"),
+        })
 
-    render_model_preload_control()
+    d = result["deductions"]
+    official_rows = [
+        ("Ascent alignment", "ascent_alignment"),
+        ("Descent alignment", "descent_alignment"),
+        ("Backpike", "backpike"),
+        ("Leg extension", "leg_extension"),
+        ("Ankle extension", "ankle_extension"),
+        ("Back roundness", "back_roundness"),
+        ("Travel", "travel"),
+        ("Unroll speed", "unroll_speed"),
+        ("Head tuck (not yet calibrated)", "head_tuck"),
+    ]
+    st.markdown("**Deductions counted toward the score**")
+    st.table({
+        "Category": [label for label, _ in official_rows],
+        "Deduction": [f"-{d.get(key, 0):.2f}" if d.get(key, 0) else "None" for _, key in official_rows],
+        "Measured": [
+            f"{d[f'{key}_degrees']:.2f}" if d.get(f"{key}_degrees") is not None else "None"
+            for _, key in official_rows
+        ],
+    })
 
-    chosen = dict(mode="lightweight", det_frequency=4)
-    waterline_value = None
-    max_duration = 60
+    coaching_rows = [
+        ("Underwater bent knee", "underwater_bent_knee", "underwater_bent_knee_degrees"),
+        ("Back layout depth (not yet calibrated)", "back_layout_depth", "back_layout_depth_value"),
+    ]
+    st.markdown("**Coaching notes** (measured, not counted toward the score)")
+    st.table({
+        "Category": [label for label, _, _ in coaching_rows],
+        "Deduction": [f"-{d.get(key, 0):.2f}" if d.get(key, 0) else "None" for _, key, _ in coaching_rows],
+        "Measured": [
+            f"{d[deg_key]:.2f}" if d.get(deg_key) is not None else "None"
+            for _, _, deg_key in coaching_rows
+        ],
+    })
+
+    if below_csv is None:
+        st.caption("No underwater video this time, so there are no underwater-only coaching notes.")
+
+    return result
+
+
+def page_analyze():
+    st.markdown('<div class="bl-label">Analyze</div>', unsafe_allow_html=True)
+    top1, top2 = st.columns([4, 2])
+    with top1:
+        st.write("Upload footage below. Every mode uses the same pose-tracking speed.")
+    with top2:
+        if st.button("Filming tips", use_container_width=True):
+            filming_tips_dialog()
+
+    warm_up_control()
 
     source = st.radio(
         "Camera source", options=["Walticam", "Above / Below"],
         horizontal=True, label_visibility="collapsed",
     )
+    swimmer_name = st.text_input("Swimmer ID (optional, shown on the score)", value="")
 
-    swimmer_id = st.text_input("Swimmer ID (optional, shown on the score)", value="")
-
-    above_water = True
     below_water = False
     if source == "Above / Below":
-        sub_mode = st.radio(
+        footage = st.radio(
             "What footage do you have?",
-            options=["Just Above", "Above + Below"],
+            options=["Just above-water", "Above + underwater"],
             horizontal=True,
         )
-        below_water = (sub_mode == "Above + Below")
+        below_water = (footage == "Above + underwater")
         if below_water:
             st.caption(
-                "The underwater video adds coaching-only feedback (bent "
-                "knee, back layout depth). The official score always "
-                "comes from the above-water footage."
+                "The underwater clip adds coaching-only notes (bent knee, "
+                "back layout depth). The score itself always comes from "
+                "the above-water footage."
             )
-
-    def run_with_progress(label):
-        progress_bar = st.progress(0.0, text=f"Starting {label}...")
-
-        def update_progress(frame_count, total_frames):
-            if total_frames > 0:
-                pct = min(frame_count / total_frames, 1.0)
-                frames_left = max(total_frames - frame_count, 0)
-                progress_bar.progress(
-                    pct, text=f"{label}: {frames_left} frame(s) left"
-                )
-        return progress_bar, update_progress
-
-    def show_results(label, video_path, csv_path, landmarks):
-        kalman_csv = tc.apply_kalman_filter_to_csv(csv_path, landmarks)
-        st.success(f"{label} processing complete.")
-        st.video(str(video_path))
-        col1, col2 = st.columns(2)
-        with col1:
-            with open(video_path, "rb") as f:
-                st.download_button(
-                    f"Download {label} video", data=f.read(),
-                    file_name=Path(video_path).name, mime="video/mp4",
-                    use_container_width=True, key=f"video_{label}",
-                )
-        with col2:
-            with open(kalman_csv, "rb") as f:
-                st.download_button(
-                    f"Download {label} data (CSV)", data=f.read(),
-                    file_name=Path(kalman_csv).name, mime="text/csv",
-                    use_container_width=True, key=f"csv_{label}",
-                )
-        return kalman_csv
-
-    def assessment_style(score):
-        if score >= 9.5: return "Excellent / Near Perfect", "#059669", "#ecfdf5"
-        if score >= 8.5: return "Very Good", "#0891b2", "#ecfeff"
-        if score >= 7.5: return "Good", "#2563eb", "#eff6ff"
-        if score >= 6.5: return "Competent", "#7c3aed", "#f5f3ff"
-        if score >= 5.5: return "Satisfactory", "#d97706", "#fffbeb"
-        if score >= 4.5: return "Deficient", "#dc2626", "#fef2f2"
-        return "Weak", "#991b1b", "#fef2f2"
-
-    def show_score(above_kalman_csv, below_kalman_csv=None, name="figure", source_mode="above"):
-        try:
-            result = BarracudaScorer.score_single_pair(
-                above_kalman_csv, below_kalman_csv, name=name, source_mode=source_mode
-            )
-        except Exception as e:
-            st.warning(f"Could not compute a score for this figure: {e}")
-            return None
-
-        st.markdown('<div class="sa-section-label">Result</div>', unsafe_allow_html=True)
-
-        score = result["score"]
-        assess, color, bg = assessment_style(score)
-
-        st.markdown(
-            f"""
-            <div class="sa-score-card">
-                <div style="color:#64748b; font-size:0.85rem; font-weight:600; letter-spacing:0.04em;">
-                    {(name or "FIGURE").upper()}
-                </div>
-                <div><span class="sa-score-number">{score:.2f}</span><span class="sa-score-max"> / 10.0</span></div>
-                <div class="sa-score-assessment" style="color:{color}; background:{bg};">{assess}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        col1, col2 = st.columns(2)
-        col1.metric("Base score (height)", f"{result['base_score']:.2f}")
-        col2.metric("Total deduction", f"-{result['total_deduction']:.2f}")
-        st.caption(f"Height metric used: {result.get('base_score_metric_used', 'n/a')}")
-
-        with st.expander("Debug info (height calculation inputs)"):
-            st.write(
-                "The base score comes from foot clearance — how far the "
-                "swimmer's ankles rise above the detected waterline. "
-                "Above / Above+Below modes use the raw frame-fraction "
-                "value; Walticam mode uses a body-length-normalized "
-                "version instead, since a split-frame camera has a "
-                "different field of view than a dedicated above-water "
-                "camera (see the Home page for why)."
-            )
-            st.json({
-                "source_mode": result.get("source_mode"),
-                "base_score_metric_used": result.get("base_score_metric_used"),
-                "foot_clearance (frame-fraction)": result.get("foot_clearance"),
-                "foot_clearance_normalized (body-lengths)": result.get("foot_clearance_normalized"),
-                "body_scale (shoulder-to-ankle, px-frame-units)": result.get("body_scale"),
-                "base_score": result.get("base_score"),
-                "ascent_tilt_median (deg)": result.get("ascent_tilt_median"),
-                "descent_tilt_median (deg)": result.get("descent_tilt_median"),
-                "knee_angle_median (deg)": result.get("knee_angle_median"),
-                "frames": result.get("frames"),
-            })
-
-        d = result["deductions"]
-        scored_rows = [
-            ("Ascent alignment", d.get("ascent_alignment", 0), d.get("ascent_alignment_degrees")),
-            ("Descent alignment", d.get("descent_alignment", 0), d.get("descent_alignment_degrees")),
-            ("Backpike", d.get("backpike", 0), d.get("backpike_degrees")),
-            ("Leg extension", d.get("leg_extension", 0), d.get("leg_extension_degrees")),
-            ("Ankle extension", d.get("ankle_extension", 0), d.get("ankle_extension_degrees")),
-            ("Back roundness", d.get("back_roundness", 0), d.get("back_roundness_degrees")),
-            ("Travel", d.get("travel", 0), d.get("travel_degrees")),
-            ("Unroll speed", d.get("unroll_speed", 0), d.get("unroll_speed_degrees")),
-            ("Head tuck (not yet calibrated)", d.get("head_tuck", 0), d.get("head_tuck_degrees")),
-        ]
-        st.markdown("**Official deductions**")
-        st.table({
-            "Category": [r[0] for r in scored_rows],
-            "Deduction": [f"-{r[1]:.2f}" if r[1] else "None" for r in scored_rows],
-            "Measured": [f"{r[2]:.2f}" if r[2] is not None else "None" for r in scored_rows],
-        })
-
-        coaching_rows = [
-            ("Underwater bent knee", d.get("underwater_bent_knee", 0), d.get("underwater_bent_knee_degrees")),
-            ("Back layout depth (not yet calibrated)", d.get("back_layout_depth", 0), d.get("back_layout_depth_value")),
-        ]
-        st.markdown("**Coaching feedback** (measured, not counted toward the score)")
-        st.table({
-            "Category": [r[0] for r in coaching_rows],
-            "Deduction": [f"-{r[1]:.2f}" if r[1] else "None" for r in coaching_rows],
-            "Measured": [f"{r[2]:.2f}" if r[2] is not None else "None" for r in coaching_rows],
-        })
-
-        if below_kalman_csv is None:
-            st.caption(
-                "No underwater video was processed, so underwater-only "
-                "coaching feedback is not available."
-            )
-
-        return result
 
     MAX_SIZE_MB = 300
 
     if source == "Walticam":
-        uploaded_file = st.file_uploader(
-            "Upload your WaltiCam video (split-screen: top=above, bottom=below)",
+        upload = st.file_uploader(
+            "Upload a WaltiCam video (split-screen: top = above, bottom = below)",
             type=["mp4", "mov", "m4v", "avi"],
         )
-
-        if uploaded_file is not None:
-            file_size_mb = uploaded_file.size / (1024 * 1024)
-            st.info(f"{uploaded_file.name} ({file_size_mb:.1f} MB)")
-
-            if file_size_mb > MAX_SIZE_MB:
-                st.error(f"File is too large ({file_size_mb:.0f} MB). Please upload a video under {MAX_SIZE_MB} MB.")
-            elif st.button("Process video", type="primary", use_container_width=True):
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    input_path = Path(tmp_dir) / uploaded_file.name
-                    with open(input_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    output_path = Path(tmp_dir) / f"{input_path.stem}_walticam_tracking.mp4"
-
-                    progress_bar, update_progress = run_with_progress("Walticam")
-                    try:
-                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
-                            above_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "above")
-                            below_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "below")
-                            st.session_state.models_preloaded = True
-                            video_file, above_csv, below_csv = tc.process_video_walticam(
-                                str(input_path), output_path,
-                                mode=chosen["mode"], det_frequency=chosen["det_frequency"],
-                                max_duration=max_duration, progress_callback=update_progress,
-                                above_pose_tracker=above_pt, below_pose_tracker=below_pt,
-                            )
-                        progress_bar.progress(1.0, text="Done.")
-
-                        above_kalman = tc.apply_kalman_filter_to_csv(above_csv, tc.ALL_LANDMARKS_ABOVE)
-                        below_kalman = tc.apply_kalman_filter_to_csv(below_csv, tc.ALL_LANDMARKS_ABOVE)
-
-                        st.success("Walticam processing complete.")
-                        st.video(str(video_file))
-
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            with open(video_file, "rb") as f:
-                                st.download_button("Combined video", data=f.read(),
-                                                    file_name=Path(video_file).name, mime="video/mp4",
-                                                    use_container_width=True)
-                        with col2:
-                            with open(above_kalman, "rb") as f:
-                                st.download_button("Above data (CSV)", data=f.read(),
-                                                    file_name=Path(above_kalman).name, mime="text/csv",
-                                                    use_container_width=True)
-                        with col3:
-                            with open(below_kalman, "rb") as f:
-                                st.download_button("Below data (CSV)", data=f.read(),
-                                                    file_name=Path(below_kalman).name, mime="text/csv",
-                                                    use_container_width=True)
-
-                        score_result = show_score(above_kalman, below_kalman, name=swimmer_id or "figure", source_mode="walticam")
-
-                        if score_result is not None:
-                            session_store.save_session(
-                                swimmer_id=swimmer_id or "figure",
-                                mode="Walticam",
-                                score_result=score_result,
-                                file_paths={
-                                    "video": video_file,
-                                    "above_csv": above_kalman,
-                                    "below_csv": below_kalman,
-                                },
-                                official_keys=BarracudaScorer.__new__(BarracudaScorer)._deduction_keys(),
-                            )
-                            st.caption("Saved to History.")
-
-                    except Exception as e:
-                        st.error(f"Something went wrong during processing: {e}")
-                        st.exception(e)
-        else:
+        if upload is None:
             st.info("Upload a WaltiCam split-screen video to get started.")
+            return
+
+        size_mb = upload.size / (1024 * 1024)
+        st.info(f"{upload.name} ({size_mb:.1f} MB)")
+        if size_mb > MAX_SIZE_MB:
+            st.error(f"That file is too large ({size_mb:.0f} MB) — please stay under {MAX_SIZE_MB} MB.")
+            return
+        if not st.button("Process video", type="primary", use_container_width=True):
+            return
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            in_path = Path(tmp_dir) / upload.name
+            with open(in_path, "wb") as f:
+                f.write(upload.getbuffer())
+            out_path = Path(tmp_dir) / f"{in_path.stem}_walticam_tracking.mp4"
+
+            bar, update = progress_tracker("Walticam")
+            try:
+                video_file, above_csv, below_csv = tc.process_video_walticam(
+                    str(in_path), out_path,
+                    mode=FAST_SETTINGS["mode"], det_frequency=FAST_SETTINGS["det_frequency"],
+                    max_duration=MAX_CLIP_SECONDS, progress_callback=update,
+                )
+                bar.progress(1.0, text="Done.")
+                st.session_state.model_warmed = True
+
+                above_kalman = tc.apply_kalman_filter_to_csv(above_csv, tc.ALL_LANDMARKS_ABOVE)
+                below_kalman = tc.apply_kalman_filter_to_csv(below_csv, tc.ALL_LANDMARKS_ABOVE)
+
+                st.success("Walticam processing complete.")
+                st.video(str(video_file))
+
+                v1, v2, v3 = st.columns(3)
+                with v1:
+                    with open(video_file, "rb") as f:
+                        st.download_button("Combined video", data=f.read(),
+                                            file_name=Path(video_file).name, mime="video/mp4",
+                                            use_container_width=True)
+                with v2:
+                    with open(above_kalman, "rb") as f:
+                        st.download_button("Above data (CSV)", data=f.read(),
+                                            file_name=Path(above_kalman).name, mime="text/csv",
+                                            use_container_width=True)
+                with v3:
+                    with open(below_kalman, "rb") as f:
+                        st.download_button("Below data (CSV)", data=f.read(),
+                                            file_name=Path(below_kalman).name, mime="text/csv",
+                                            use_container_width=True)
+
+                result = render_score(above_kalman, below_kalman, swimmer_name=swimmer_name or "figure")
+                if result is not None:
+                    session_store.save_session(
+                        swimmer_id=swimmer_name or "figure",
+                        mode="Walticam",
+                        score_result=result,
+                        file_paths={"video": video_file, "above_csv": above_kalman, "below_csv": below_kalman},
+                        official_keys=BarracudaScorer.__new__(BarracudaScorer)._deduction_keys(),
+                    )
+                    st.caption("Saved to History.")
+
+            except Exception as e:
+                st.error(f"Something went wrong during processing: {e}")
+                st.exception(e)
 
     else:
-        above_file, below_file = None, None
-
         above_file = st.file_uploader(
             "Upload above-water video", type=["mp4", "mov", "m4v", "avi"], key="above_upload"
         )
+        below_file = None
         if below_water:
             below_file = st.file_uploader(
                 "Upload underwater video", type=["mp4", "mov", "m4v", "avi"], key="below_upload"
             )
 
-        ready = (above_file is not None) and (not below_water or below_file is not None)
-
-        if ready and above_file is not None:
-            oversized = []
-            if above_file.size / (1024 * 1024) > MAX_SIZE_MB:
-                oversized.append(above_file.name)
-            if below_file is not None and below_file.size / (1024 * 1024) > MAX_SIZE_MB:
-                oversized.append(below_file.name)
-
-            if oversized:
-                st.error(f"These files are too large (over {MAX_SIZE_MB} MB): {', '.join(oversized)}")
-            elif st.button("Process video(s)", type="primary", use_container_width=True):
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    above_kalman_result = None
-                    below_kalman_result = None
-                    above_video_file = None
-                    below_video_file = None
-                    try:
-                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
-                            shared_pt = _cached_pose_tracker(chosen["mode"], chosen["det_frequency"])
-                            st.session_state.models_preloaded = True
-
-                            above_input = Path(tmp_dir) / above_file.name
-                            with open(above_input, "wb") as f:
-                                f.write(above_file.getbuffer())
-                            above_output = Path(tmp_dir) / f"{above_input.stem}_above_tracking.mp4"
-
-                            _, update_above = run_with_progress("Above-water")
-                            video_file, csv_file = tc.process_video_above_water(
-                                str(above_input), above_output, waterline_value,
-                                mode=chosen["mode"], det_frequency=chosen["det_frequency"],
-                                max_duration=max_duration, progress_callback=update_above,
-                                pose_tracker=shared_pt,
-                            )
-                            above_video_file = video_file
-                            above_kalman_result = show_results(
-                                "Above-water", video_file, csv_file, tc.ALL_LANDMARKS_ABOVE
-                            )
-
-                            if below_water and below_file is not None:
-                                below_input = Path(tmp_dir) / below_file.name
-                                with open(below_input, "wb") as f:
-                                    f.write(below_file.getbuffer())
-                                below_output = Path(tmp_dir) / f"{below_input.stem}_below_tracking.mp4"
-
-                                _, update_below = run_with_progress("Underwater")
-                                video_file, csv_file = tc.process_video_underwater(
-                                    str(below_input), below_output, waterline_value,
-                                    mode=chosen["mode"], det_frequency=chosen["det_frequency"],
-                                    max_duration=max_duration, progress_callback=update_below,
-                                    pose_tracker=shared_pt,
-                                )
-                                below_video_file = video_file
-                                below_kalman_result = show_results(
-                                    "Underwater", video_file, csv_file, tc.ALL_LANDMARKS_UNDERWATER
-                                )
-
-                        if above_kalman_result is not None:
-                            source_mode = "above_below" if below_kalman_result is not None else "above"
-                            score_result = show_score(
-                                above_kalman_result, below_kalman_result,
-                                name=swimmer_id or "figure", source_mode=source_mode,
-                            )
-
-                            if score_result is not None:
-                                mode_label = "Above+Below" if below_kalman_result is not None else "Above-Water"
-                                session_store.save_session(
-                                    swimmer_id=swimmer_id or "figure",
-                                    mode=mode_label,
-                                    score_result=score_result,
-                                    file_paths={
-                                        "above_video": above_video_file,
-                                        "below_video": below_video_file,
-                                        "above_csv": above_kalman_result,
-                                        "below_csv": below_kalman_result,
-                                    },
-                                    official_keys=BarracudaScorer.__new__(BarracudaScorer)._deduction_keys(),
-                                )
-                                st.caption("Saved to History.")
-
-                    except Exception as e:
-                        st.error(f"Something went wrong during processing: {e}")
-                        st.exception(e)
-        else:
+        ready = above_file is not None and (not below_water or below_file is not None)
+        if not ready:
             st.info("Upload your above-water video (and underwater too, if you have it) to get started.")
+            return
+
+        oversized = []
+        if above_file.size / (1024 * 1024) > MAX_SIZE_MB:
+            oversized.append(above_file.name)
+        if below_file is not None and below_file.size / (1024 * 1024) > MAX_SIZE_MB:
+            oversized.append(below_file.name)
+        if oversized:
+            st.error(f"These files are over {MAX_SIZE_MB} MB: {', '.join(oversized)}")
+            return
+        if not st.button("Process video(s)", type="primary", use_container_width=True):
+            return
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            above_kalman = None
+            below_kalman = None
+            above_video = None
+            below_video = None
+            try:
+                above_in = Path(tmp_dir) / above_file.name
+                with open(above_in, "wb") as f:
+                    f.write(above_file.getbuffer())
+                above_out = Path(tmp_dir) / f"{above_in.stem}_above_tracking.mp4"
+
+                _, update_above = progress_tracker("Above-water")
+                video_file, csv_file = tc.process_video_above_water(
+                    str(above_in), above_out,
+                    mode=FAST_SETTINGS["mode"], det_frequency=FAST_SETTINGS["det_frequency"],
+                    max_duration=MAX_CLIP_SECONDS, progress_callback=update_above,
+                )
+                st.session_state.model_warmed = True
+                above_video = video_file
+                above_kalman = deliver_result("Above-water", video_file, csv_file, tc.ALL_LANDMARKS_ABOVE)
+
+                if below_water and below_file is not None:
+                    below_in = Path(tmp_dir) / below_file.name
+                    with open(below_in, "wb") as f:
+                        f.write(below_file.getbuffer())
+                    below_out = Path(tmp_dir) / f"{below_in.stem}_below_tracking.mp4"
+
+                    _, update_below = progress_tracker("Underwater")
+                    video_file, csv_file = tc.process_video_underwater(
+                        str(below_in), below_out,
+                        mode=FAST_SETTINGS["mode"], det_frequency=FAST_SETTINGS["det_frequency"],
+                        max_duration=MAX_CLIP_SECONDS, progress_callback=update_below,
+                    )
+                    below_video = video_file
+                    below_kalman = deliver_result("Underwater", video_file, csv_file, tc.ALL_LANDMARKS_UNDERWATER)
+
+                if above_kalman is not None:
+                    result = render_score(above_kalman, below_kalman, swimmer_name=swimmer_name or "figure")
+                    if result is not None:
+                        mode_label = "Above+Below" if below_kalman is not None else "Above-Water"
+                        session_store.save_session(
+                            swimmer_id=swimmer_name or "figure",
+                            mode=mode_label,
+                            score_result=result,
+                            file_paths={
+                                "above_video": above_video, "below_video": below_video,
+                                "above_csv": above_kalman, "below_csv": below_kalman,
+                            },
+                            official_keys=BarracudaScorer.__new__(BarracudaScorer)._deduction_keys(),
+                        )
+                        st.caption("Saved to History.")
+
+            except Exception as e:
+                st.error(f"Something went wrong during processing: {e}")
+                st.exception(e)
 
 
-# ============================================================================
-# HISTORY PAGE
-# ============================================================================
-def render_athlete_progress(sessions):
-    """Score-over-time chart plus a notepad of still-outstanding deductions
-    for a chosen athlete, built from stored session history."""
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+def athlete_progress_panel(sessions):
     swimmer_ids = sorted({s.get("swimmer_id", "Unknown") for s in sessions})
     if not swimmer_ids:
         return
 
-    st.markdown('<div class="sa-section-label">Athlete progress</div>', unsafe_allow_html=True)
-    chosen_swimmer = st.selectbox("Athlete", options=swimmer_ids, key="athlete_progress_select")
+    st.markdown('<div class="bl-label">Progress by athlete</div>', unsafe_allow_html=True)
+    swimmer = st.selectbox("Athlete", options=swimmer_ids, key="progress_swimmer")
 
-    athlete_sessions = [s for s in sessions if s.get("swimmer_id", "Unknown") == chosen_swimmer]
-    # session_store returns newest-first; sort ascending (oldest to newest)
-    # for a chronological trend line.
-    athlete_sessions = sorted(athlete_sessions, key=lambda s: s.get("timestamp", ""))
+    their_sessions = sorted(
+        (s for s in sessions if s.get("swimmer_id", "Unknown") == swimmer),
+        key=lambda s: s.get("timestamp", ""),
+    )
+    scored = [s for s in their_sessions if s.get("score") is not None]
 
-    scored = [s for s in athlete_sessions if s.get("score") is not None]
     if len(scored) >= 2:
-        chart_df = pd.DataFrame({
-            "Score": [s["score"] for s in scored],
-            "Base score": [s.get("base_score") for s in scored],
-        }, index=pd.to_datetime([s["timestamp"] for s in scored]))
-        st.line_chart(chart_df)
-        improvement = scored[-1]["score"] - scored[0]["score"]
-        direction = "up" if improvement > 0 else ("down" if improvement < 0 else "unchanged")
+        chart = pd.DataFrame(
+            {"Score": [s["score"] for s in scored], "Base score": [s.get("base_score") for s in scored]},
+            index=pd.to_datetime([s["timestamp"] for s in scored]),
+        )
+        st.line_chart(chart)
+        delta = scored[-1]["score"] - scored[0]["score"]
+        direction = "up" if delta > 0 else ("down" if delta < 0 else "unchanged")
         st.caption(
-            f"{len(scored)} scored sessions for {chosen_swimmer}. "
-            f"Score is {direction} {abs(improvement):.2f} from the first to the most recent session."
+            f"{len(scored)} scored sessions for {swimmer}. Score is "
+            f"{direction} {abs(delta):.2f} from first to most recent."
         )
     elif len(scored) == 1:
-        st.info(f"Only one scored session for {chosen_swimmer} so far — a trend line needs at least two.")
+        st.info(f"Only one scored session for {swimmer} so far — a trend needs at least two.")
     else:
-        st.info(f"No scored sessions for {chosen_swimmer} yet.")
+        st.info(f"No scored sessions for {swimmer} yet.")
 
-    st.markdown("**Still needs work**")
-    if not athlete_sessions:
-        return
-
-    latest = athlete_sessions[-1]
-    deductions = latest.get("deductions")
-    official_keys = latest.get("official_keys")
-
-    if deductions is None or official_keys is None:
-        st.caption(
-            "This athlete's most recent session was saved before deduction "
-            "details started being tracked — analyze a new video for them "
-            "to enable this list."
-        )
-        return
-
-    outstanding = [
-        (key, deductions.get(key, 0), deductions.get(f"{key}_degrees"))
-        for key in official_keys
-        if isinstance(deductions.get(key), (int, float)) and deductions.get(key, 0) > 0
-    ]
-    outstanding.sort(key=lambda x: x[1], reverse=True)
-
-    if not outstanding:
-        st.success(f"No outstanding deductions in {chosen_swimmer}'s most recent session ({latest['timestamp']}).")
-        return
-
-    st.caption(f"From the most recent session ({latest['timestamp']}):")
-    for key, value, degrees in outstanding:
-        label = DEDUCTION_LABELS.get(key, key.replace("_", " ").title())
-        measured = f" — measured {degrees:.2f}" if degrees is not None else ""
-        st.markdown(f"- **{label}**: -{value:.2f}{measured}")
+    if their_sessions:
+        latest = their_sessions[-1]
+        st.markdown("**Top issues in the most recent session**")
+        st.caption(f"{latest['timestamp']}: {latest.get('summary', 'No summary available.')}")
 
 
-def render_history():
-    st.markdown('<div class="sa-section-label">History</div>', unsafe_allow_html=True)
+def page_history():
+    st.markdown('<div class="bl-label">History</div>', unsafe_allow_html=True)
     st.caption(
-        "Not persistent on free-tier hosting — sessions are lost if the "
-        "app restarts or sleeps. Local `streamlit run` keeps them on disk."
+        "Not persistent on free-tier hosting — sessions disappear if the "
+        "app restarts or goes to sleep. A local `streamlit run` keeps "
+        "them on disk."
     )
 
     sessions = session_store.load_sessions()
     if not sessions:
-        st.info("No sessions scored yet. Analyze a video to see it here.")
+        st.info("Nothing scored yet — analyze a video and it'll show up here.")
         if st.button("Go to Analyze", type="primary"):
-            go_to("analyze")
+            go("analyze")
         return
 
     st.write(f"{len(sessions)} figure{'s' if len(sessions) != 1 else ''} scored")
@@ -929,17 +790,15 @@ def render_history():
         session_store.clear_all_sessions()
         st.rerun()
 
-    render_athlete_progress(sessions)
+    athlete_progress_panel(sessions)
 
-    st.markdown('<div class="sa-section-label">All sessions</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bl-label">All sessions</div>', unsafe_allow_html=True)
     for s in sessions:
         score_str = f"{s['score']:.2f}/10" if s.get("score") is not None else "None"
         with st.expander(f"{s['swimmer_id']} - {score_str} ({s['timestamp']})"):
             st.write(f"Mode: {s['mode']}")
-            base = s.get("base_score")
-            ded = s.get("total_deduction")
-            if base is not None and ded is not None:
-                st.write(f"Base: {base:.2f}  |  Deduction: -{ded:.2f}")
+            if s.get("base_score") is not None and s.get("total_deduction") is not None:
+                st.write(f"Base: {s['base_score']:.2f}  |  Deduction: -{s['total_deduction']:.2f}")
             st.write(f"Top issues: {s['summary']}")
             for key, rel_path in s.get("files", {}).items():
                 fpath = session_store.session_file_path(rel_path)
@@ -947,119 +806,101 @@ def render_history():
                     with open(fpath, "rb") as f:
                         mime = "video/mp4" if "video" in key else "text/csv"
                         st.download_button(
-                            key, data=f.read(), file_name=fpath.name,
-                            mime=mime, key=f"hist_{s['id']}_{key}",
-                            use_container_width=True,
+                            key, data=f.read(), file_name=fpath.name, mime=mime,
+                            key=f"hist_{s['id']}_{key}", use_container_width=True,
                         )
             if st.button("Delete", key=f"del_{s['id']}"):
                 session_store.delete_session(s["id"])
                 st.rerun()
 
 
-# ============================================================================
-# HELP PAGE
-# ============================================================================
-def render_help():
-    st.markdown('<div class="sa-section-label">Help</div>', unsafe_allow_html=True)
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+def page_help():
+    st.markdown('<div class="bl-label">Help</div>', unsafe_allow_html=True)
     st.write(
-        "Something wrong with a score, the waterline, or the tracked "
-        "skeleton? Describe it below — this is sent directly for review "
-        "and fixing."
+        "Something off with a score, the waterline, or the tracked "
+        "skeleton? Describe it below and it's logged for review."
     )
 
     with st.form("issue_report_form"):
         name = st.text_input("Your name (optional)")
-        contact_email = st.text_input("Your email, if you want a reply (optional)")
+        contact_email = st.text_input("Your email, if you'd like a reply (optional)")
         page_context = st.selectbox(
             "Which part of the app is this about?",
-            options=["Analyze - Walticam", "Analyze - Just Above", "Analyze - Above + Below",
+            options=["Analyze - Walticam", "Analyze - Just above-water", "Analyze - Above + underwater",
                      "History", "Scoring / results", "Something else"],
         )
         description = st.text_area(
             "What happened?",
-            placeholder="Example: the waterline was drawn well above the swimmer for this video, "
-                        "or the score seemed too high given the deductions shown.",
+            placeholder="Example: the waterline was drawn well above the swimmer in this video, "
+                        "or the score seemed off given the deductions shown.",
             height=140,
         )
         submitted = st.form_submit_button("Send report", type="primary")
 
     if submitted:
         if not description.strip():
-            st.warning("Please describe the issue before sending.")
+            st.warning("Add a description before sending.")
         else:
             record, mailto_url = issue_reports.save_report(name, contact_email, description, page_context)
             st.success("Report saved.")
-            st.markdown(
-                f'<a href="{mailto_url}" target="_blank">Click here to also send this by email</a>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<a href="{mailto_url}" target="_blank">Also send this by email</a>', unsafe_allow_html=True)
             st.caption(
-                "The report is saved locally on this app's server. Clicking the "
-                "link above additionally opens your email client with the "
-                "report pre-filled, so it reaches the developer even if this "
-                "app's storage does not persist."
+                "Saved on this app's server. The email link opens your "
+                "mail client with the report pre-filled, so it still "
+                "reaches the developer even if this app's storage doesn't "
+                "persist."
             )
 
-    with st.expander("Previously submitted reports (this session's storage)"):
+    with st.expander("Previously submitted reports (this server's storage)"):
         reports = issue_reports.load_reports()
         if not reports:
-            st.caption("No reports submitted yet.")
+            st.caption("No reports yet.")
         else:
             for r in reports:
                 st.write(f"{r['timestamp']} - {r['name']} - {r['page_context']}")
                 st.caption(r["description"])
 
 
-# ============================================================================
-# ROUTING
-# ============================================================================
-if st.session_state.page == "home":
-    render_home()
-elif st.session_state.page == "analyze":
-    render_analyze()
-elif st.session_state.page == "history":
-    render_history()
-elif st.session_state.page == "help":
-    render_help()
-else:
-    render_home()
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+_dispatch = {"home": page_home, "analyze": page_analyze, "history": page_history, "help": page_help}
+_dispatch.get(st.session_state.page, page_home)()
 
 if st.session_state.page != "analyze":
     st.divider()
     with st.expander("About " + APP_NAME):
         st.markdown(
             """
-            This tool uses RTMPose (via `rtmlib`) for pose detection, with
-            three modes:
+            Pose detection runs on RTMPose (via `rtmlib`), always at the
+            same fast setting, in one of three modes:
 
-            - Walticam: a single split-screen video (top half = above-water,
-              bottom half = underwater), tracked with two RTMPose instances
-              running in tandem, using real heel/toe/neck keypoints (Halpe26).
-            - Above / Below: separate above-water and/or underwater videos,
-              each run through a dedicated tracker with:
-                - Physical tent/background masking (above-water only)
-                - Waterline detected from shoulder and hip position
-                - Validated swimmer locking, with a periodic re-check
-                  requiring two consecutive disagreements before switching
-                  who is tracked
-                - Multi-level smoothing and Kalman filtering
-                - A synthesized mid_spine point (underwater only) for
-                  back-curvature measurements
+            - **Walticam** — a single split-screen video (top = above,
+              bottom = below), tracked with two trackers running side by
+              side on the same frame.
+            - **Above / Below** — separate above-water and/or underwater
+              videos, each through its own tracker: tent/pool-deck
+              masking and waterline detection above water, a synthesized
+              mid-spine point underwater for back-curvature measurements,
+              with Kalman filtering applied to both.
 
             Scoring is FINA-aligned: a base score from jump height, minus
             deductions for alignment, backpike, leg/ankle extension, back
-            roundness, travel, and unroll speed, blended 70 percent
-            absolute (fixed thresholds) and 30 percent relative (how this
-            figure compares to others scored in the same batch). Walticam
-            mode uses a body-length-normalized height metric instead of
-            the raw frame-fraction one, since a split-frame camera has a
-            different field of view than a dedicated above-water camera.
+            roundness, travel, and unroll speed — blended 70% against a
+            fixed technical standard and 30% relative to other figures
+            scored in the same batch (a single-figure run in this app
+            uses the fixed standard only). Head tuck and back-layout
+            depth are measured but not yet counted toward the score.
 
-            Every scored figure is saved to History for later reference.
+            Every scored figure is saved to History automatically.
             """
         )
-
     st.markdown(
-        f'<div class="sa-footer">{APP_NAME} — RTMPose tracking, Kalman filtering, FINA-aligned scoring</div>',
+        f'<div class="bl-foot">{APP_NAME} — RTMPose tracking, Kalman filtering, FINA-aligned scoring</div>',
         unsafe_allow_html=True,
     )
