@@ -164,11 +164,12 @@ st.markdown(
         padding-bottom: 10px; margin-bottom: 10px;
         border-bottom: 1px solid rgba(30,58,95,0.15);
     }
-    .bl-wordmark {
-        font-size: 2.2rem; font-weight: 800; letter-spacing: -0.03em;
-        color: #1e3a5f; text-decoration: none; cursor: pointer;
+    a.bl-wordmark, a.bl-wordmark:link, a.bl-wordmark:visited {
+        font-size: 2.2rem !important; font-weight: 800 !important; letter-spacing: -0.03em !important;
+        color: #1e3a5f !important; text-decoration: none !important; cursor: pointer;
+        display: inline-block;
     }
-    .bl-wordmark:hover { color: #2b5480; text-decoration: none; }
+    a.bl-wordmark:hover { color: #2b5480 !important; text-decoration: none !important; }
     div[data-testid="column"]:has(.bl-wordmark) { padding-top: 6px; }
 
     .bl-hero {
