@@ -16,7 +16,6 @@ Deploy: push this folder to a Hugging Face Space or Streamlit Cloud.
 
 import streamlit as st
 import tempfile
-import time
 from pathlib import Path
 
 import tracker_core as tc
@@ -75,28 +74,15 @@ with st.sidebar:
                     st.rerun()
 
 # ── Sidebar settings ──────────────────────────────────────────────────────
+# Speed is always "Fast" now — the Balanced/Most Accurate choice and the
+# duration slider were removed. max_duration is a fixed internal cap so
+# runtimes stay reasonable; nothing downstream had to change.
+chosen = dict(mode="lightweight", det_frequency=4)
+max_duration = 60
+
 with st.sidebar:
     st.header("Settings")
 
-    speed_choice = st.select_slider(
-        "Speed vs. accuracy",
-        options=["Fast", "Balanced", "Most Accurate"],
-        value="Fast",
-        help=(
-            "Fast: quickest results, good for previewing.\n"
-            "Balanced: recommended default.\n"
-            "Most Accurate: best joint precision, slowest (can take several "
-            "minutes per video on this free server)."
-        ),
-    )
-    speed_map = {
-        "Fast": dict(mode="lightweight", det_frequency=4),
-        "Balanced": dict(mode="balanced", det_frequency=2),
-        "Most Accurate": dict(mode="performance", det_frequency=1),
-    }
-    chosen = speed_map[speed_choice]
-
-    st.divider()
     manual_waterline = st.checkbox("Set waterline manually (Above/Below only)", value=False)
     waterline_value = None
     if manual_waterline:
@@ -106,17 +92,7 @@ with st.sidebar:
         )
 
     st.divider()
-    max_duration = st.slider(
-        "Max figure duration to track (seconds)",
-        min_value=10, max_value=90, value=60, step=5,
-        help="Processing stops after this many seconds to keep runtimes reasonable.",
-    )
-
-    st.divider()
-    st.caption(
-        "⏱️ This app runs on shared CPU hardware. A 30–60 second clip can "
-        "take a few minutes to process, especially on 'Most Accurate'."
-    )
+    st.caption("⏱️ This app runs on shared CPU hardware.")
 
 # ── Pill-button styling for the segmented controls below ──────────────────
 # NOTE: previously this hid `div:first-child` inside each radio label to
@@ -161,16 +137,13 @@ if source == "Above / Below":
 def run_with_progress(label):
     """Returns (progress_bar, update_progress_fn) pair for a processing step."""
     progress_bar = st.progress(0.0, text=f"Starting {label}...")
-    start_time = time.time()
 
     def update_progress(frame_count, total_frames):
         if total_frames > 0:
             pct = min(frame_count / total_frames, 1.0)
-            elapsed = time.time() - start_time
-            fps_proc = frame_count / elapsed if elapsed > 0 else 0
-            eta = (total_frames - frame_count) / fps_proc if fps_proc > 0 else 0
+            frames_left = max(total_frames - frame_count, 0)
             progress_bar.progress(
-                pct, text=f"{label}: frame {frame_count}/{total_frames} (~{eta:.0f}s remaining)"
+                pct, text=f"{label}: {frames_left} frame(s) left"
             )
     return progress_bar, update_progress
 
