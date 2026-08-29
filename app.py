@@ -120,11 +120,19 @@ def local_copy_button():
 def figure_image(col, filename, caption):
     path = APP_DIR / filename
     with col:
+        shown = False
         if path.exists():
-            st.image(str(path), use_container_width=True)
-            st.markdown(f'<p class="bl-caption">{caption}</p>', unsafe_allow_html=True)
-        else:
-            st.warning(f"{filename} isn't in the app folder yet ({APP_DIR}).")
+            try:
+                st.image(str(path), use_container_width=True)
+                shown = True
+            except Exception:
+                shown = False
+        if not shown:
+            st.markdown(
+                '<div class="bl-img-placeholder">Photo not added yet</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(f'<p class="bl-caption">{caption}</p>', unsafe_allow_html=True)
 
 
 @st.dialog("Filming tips")
@@ -193,6 +201,12 @@ st.markdown(
     .bl-tile p { margin: 0; font-size: 0.9rem; color: #475569 !important; line-height: 1.5; }
 
     .bl-caption { font-size: 0.83rem; color: #475569 !important; text-align: center; margin-top: 6px; }
+    .bl-img-placeholder {
+        display: flex; align-items: center; justify-content: center;
+        height: 180px; border-radius: 10px;
+        background: rgba(30,58,95,0.05); border: 1px dashed rgba(30,58,95,0.25);
+        color: #64748b; font-size: 0.85rem;
+    }
     div[data-testid="stImage"] img { border-radius: 10px; border: 1px solid rgba(30,58,95,0.12); }
 
     div[role="radiogroup"] {
