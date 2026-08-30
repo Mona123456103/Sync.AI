@@ -608,7 +608,15 @@ def render_analyze():
 
     render_model_preload_control()
 
-    chosen = dict(mode="lightweight", det_frequency=4)
+    # det_frequency controls how often the underlying model re-runs full
+    # person detection vs. reusing/tracking a previous frame's result.
+    # Was 4 — nudged down slightly (a little slower, per direct request
+    # for a bit more accuracy) specifically because a too-infrequent
+    # detector was letting the tracker drift onto — and then stay
+    # locked onto — background clutter for several frames at a time
+    # instead of getting a fresh chance to re-identify the real
+    # swimmer. mode stays "lightweight" (unchanged).
+    chosen = dict(mode="lightweight", det_frequency=3)
     waterline_value = None
     max_duration = 60
 
