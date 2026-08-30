@@ -426,14 +426,37 @@ def is_in_water_lenient(hip_x_norm, hip_y_norm, water_level, frame):
     return True
 
 
-def is_water_relative(hip_x_norm, hip_y_norm, sub_frame, margin=25):
+def is_water_relative(hip_x_norm, hip_y_norm, sub_frame, water_level_norm=None, margin=25):
     """Relative (not calibrated-absolute) water check — used by the
     WaltiCam path, deliberately, since calibrated absolute color ranges
-    are the category of fix that caused cross-venue regressions before."""
+    are the category of fix that caused cross-venue regressions before.
+
+    ACCURACY FIX: margin is a fixed PIXEL count, and this used to always
+    sample a tiny window starting just 5px below the candidate's OWN
+    hip position. For a swimmer whose hip has risen any real distance
+    above the water — the entire point of a good jump — that tiny
+    window never reaches real water at all; it only samples air or
+    background right around the hip, so the check would fail and
+    reject a perfectly real swimmer right at the peak of their figure,
+    which is exactly the frame that matters most. Now samples around
+    the KNOWN water_level instead (when the caller has one), confirming
+    there's a real pool with visible water at the expected surface
+    height near this candidate's x position — which stays correct
+    regardless of how high the swimmer has risen. A person standing on
+    deck still correctly fails this, since there's no real water at the
+    pool's actual surface height near wherever they're standing at
+    poolside x-position. Falls back to the old hip-relative sampling
+    only when no water_level is available."""
     h, w = sub_frame.shape[:2]
     x = int(np.clip(hip_x_norm, 0, 1) * w)
-    y = int(np.clip(hip_y_norm, 0, 1) * h)
-    y0, y1 = min(h, y + 5), min(h, y + 5 + margin)
+
+    if water_level_norm is not None:
+        y_water = int(np.clip(water_level_norm, 0, 1) * h)
+        y0, y1 = max(0, y_water - margin), min(h, y_water + margin)
+    else:
+        y = int(np.clip(hip_y_norm, 0, 1) * h)
+        y0, y1 = min(h, y + 5), min(h, y + 5 + margin)
+
     x0, x1 = max(0, x - margin), min(w, x + margin)
     region = sub_frame[y0:y1, x0:x1]
     if region.size == 0:
@@ -1607,10 +1630,10 @@ class WalticamAboveTracker:
         self.hip_correction_ratio = 0.20
         self.lock = SwimmerLock()
 
-    def _is_valid_candidate(self, kps, sc, hip, sub_frame):
+    def _is_valid_candidate(self, kps, sc, hip, sub_frame, water_level):
         if hip['x'] < 0.10 or hip['x'] > 0.90:
             return False
-        return is_water_relative(hip['x'], hip['y'], sub_frame)
+        return is_water_relative(hip['x'], hip['y'], sub_frame, water_level_norm=water_level)
 
     def process_frame(self, frame_top, frame_num, fps, water_level):
         h, w = frame_top.shape[:2]
@@ -1622,7 +1645,12 @@ class WalticamAboveTracker:
             'water_level': round(water_level, 4), 'tracking_locked': False,
         }
 
-        best_idx = self.lock.select(keypoints, scores, h, w, self._is_valid_candidate, frame_top)
+        # water_level isn't part of SwimmerLock's is_candidate_valid_fn
+        # calling convention (kps, sc, hip, sub_frame) — a closure
+        # carries it through without changing that shared convention,
+        # which WalticamBelowTracker also depends on staying the same.
+        is_valid = lambda kps, sc, hip, sf: self._is_valid_candidate(kps, sc, hip, sf, water_level)
+        best_idx = self.lock.select(keypoints, scores, h, w, is_valid, frame_top)
         best_person = (keypoints[best_idx], scores[best_idx]) if best_idx is not None else None
 
         if best_person is not None:
