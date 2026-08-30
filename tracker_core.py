@@ -68,6 +68,32 @@ def _output_video_size(w, h, max_width=MAX_OUTPUT_VIDEO_WIDTH):
     scale = max_width / w
     return max_width, max(2, int(round(h * scale)) // 2 * 2)  # keep height even (codec-friendly)
 
+
+def _open_browser_compatible_writer(output_path, fps, size):
+    """PLAYBACK FIX: all three video-writing call sites were using the
+    'mp4v' FourCC (MPEG-4 Part 2) — this produces a structurally valid
+    .mp4 file, but that codec isn't reliably decodable by browsers'
+    native <video> element (what st.video() renders), which is exactly
+    what "click play and nothing happens" looks like even though the
+    file itself downloads fine and plays in a desktop player like VLC.
+
+    Tries H.264 ('avc1') first, which browsers play natively — falls
+    back to 'mp4v' only if this OpenCV build genuinely doesn't have an
+    H.264 encoder available (common on some minimal/CPU-only builds),
+    so video writing still succeeds either way; playback in that
+    fallback case may need a download instead of inline play, same as
+    before this fix."""
+    for fourcc_str in ('avc1', 'H264', 'mp4v'):
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, size)
+        if writer.isOpened():
+            return writer
+        writer.release()
+    # Last resort — some builds under-report isOpened() but still write
+    # valid output, so don't leave the caller with no writer at all.
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    return cv2.VideoWriter(str(output_path), fourcc, fps, size)
+
 MAX_FRAMES_LOST = 30
 SHORT_GAP_HOLD_FRAMES = 5   # hold last known position through brief gaps only
 RELOCK_CHECK_INTERVAL = 45
@@ -181,7 +207,14 @@ HALPE_CONNECTIONS = [
 ]
 
 MIN_KEYPOINT_CONF = 0.15
-MIN_KEYPOINT_CONF_LOWER_BODY = 0.08
+# FOOT EMPHASIS: was 0.08 — lowered to match the single-video
+# above-water tracker's already-lenient floor (it accepts any keypoint
+# above 0.05, hardcoded directly in AboveWaterRTMPoseTracker rather
+# than via this constant). Feet/ankles are usually the hardest joints
+# to get high confidence on, especially with splash near the surface,
+# so a tighter floor here was discarding more real detections than
+# elsewhere in this file.
+MIN_KEYPOINT_CONF_LOWER_BODY = 0.05
 LOWER_BODY_LANDMARK_NAMES = {
     'left_hip', 'right_hip', 'left_knee', 'right_knee',
     'left_ankle', 'right_ankle',
@@ -944,16 +977,22 @@ class AboveWaterRTMPoseTracker:
                 result['source'] = history[-1]['source']
             return result
 
+        # FOOT EMPHASIS: power exponent controls how much MORE weight
+        # recent observations get vs older ones in this joint's
+        # weighted average — higher power = more responsive to what the
+        # foot is doing right now, less smeared by older frames. Feet
+        # drive foot_clearance (and therefore base_score) directly, so
+        # they get the highest emphasis of any joint here.
         for joint_name in ALL_LANDMARKS_ABOVE:
             is_foot = 'foot' in joint_name or 'ankle' in joint_name or 'heel' in joint_name
             hist = [f[joint_name] for f in self.position_history if joint_name in f]
             if hist:
-                smoothed[joint_name] = _weighted_avg(hist, 2.0 if is_foot else 1.0)
+                smoothed[joint_name] = _weighted_avg(hist, 2.5 if is_foot else 1.0)
 
         for side in ['left', 'right']:
             key = f'{side}_foot_best'
             if key in self.foot_history and self.foot_history[key]:
-                smoothed[key] = _weighted_avg(self.foot_history[key], 2.0)
+                smoothed[key] = _weighted_avg(self.foot_history[key], 2.5)
             hip_key = f'{side}_hip_ultra'
             if hip_key in self.hip_history and self.hip_history[hip_key]:
                 smoothed[f'{side}_hip'] = _weighted_avg(self.hip_history[hip_key], 3.0)
@@ -1174,7 +1213,7 @@ class RTMPoseUnderwaterTracker:
             is_foot = 'foot' in name or 'toe' in name or 'ankle' in name or 'heel' in name
             hist = [f[name] for f in self.position_history if name in f]
             if hist:
-                smoothed[name] = _wavg(hist, power=1.5 if is_foot else 1.0)
+                smoothed[name] = _wavg(hist, power=2.0 if is_foot else 1.0)
 
         for side in ['left', 'right']:
             if self.hip_history[side]:
@@ -1440,8 +1479,7 @@ def process_video_above_water(input_path, output_path, water_level=None,
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     out_w, out_h = _output_video_size(w, h)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (out_w, out_h))
+    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_count = 0
@@ -1487,8 +1525,7 @@ def process_video_underwater(input_path, output_path, water_level=None,
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_w, out_h = _output_video_size(w, h)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (out_w, out_h))
+    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
 
     frame_count = 0
     while frame_count < max_frames:
@@ -1609,10 +1646,18 @@ class WalticamAboveTracker:
 
     def _smooth(self, water_level):
         smoothed = {}
+        # FOOT EMPHASIS: this tracker's landmark set has no dedicated
+        # foot/heel/toe points above water (those only exist in the
+        # below-water half — see ALL_LANDMARKS_WALTICAM_BELOW) — ankle
+        # is the practical foot proxy here, so it gets the same
+        # higher-recency-weight treatment feet get elsewhere in this
+        # file, instead of being smoothed identically to every other
+        # joint like it was before.
         for name in ALL_LANDMARKS_WALTICAM_ABOVE:
             hist = [f[name] for f in self.position_history if name in f]
             if hist:
-                weights = [(i + 1) ** 1.0 for i in range(len(hist))]
+                power = 2.0 if 'ankle' in name else 1.0
+                weights = [(i + 1) ** power for i in range(len(hist))]
                 tw = sum(weights)
                 smoothed[name] = {
                     'x': sum(p['x'] * w for p, w in zip(hist, weights)) / tw,
@@ -1744,7 +1789,7 @@ class WalticamBelowTracker:
             is_foot = 'foot' in name or 'toe' in name or 'ankle' in name or 'heel' in name
             hist = [f[name] for f in self.position_history if name in f]
             if hist:
-                smoothed[name] = _wavg(hist, power=1.5 if is_foot else 1.0)
+                smoothed[name] = _wavg(hist, power=2.0 if is_foot else 1.0)
 
         for side in ['left', 'right']:
             if self.hip_history[side]:
@@ -1819,8 +1864,7 @@ def process_video_walticam(input_path, output_path, mode='performance',
     max_frames = min(int(max_duration * fps), total) if max_duration else total
 
     out_w, out_h = _output_video_size(w, h)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (out_w, out_h))
+    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_count = 0
