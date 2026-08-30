@@ -386,14 +386,23 @@ class BarracudaScorer:
         d = round(min(cap, max(0.0, d)) / 0.1) * 0.1
         return round(d, 2)
 
+    # LENIENCY ADJUSTMENT (direct calibration feedback: deductions were
+    # running harsher than intended in practice). No judge-confirmed
+    # anchor points are documented for alignment or backpike in the
+    # calibration log, so these are widened directly.
     _VERTICAL_ALIGNMENT_BREAKPOINTS = [
-        (0, 0.0), (3, 0.0), (5, 0.2), (7, 0.4), (9, 0.6), (12, 0.8), (20, 1.0)
+        (0, 0.0), (4, 0.0), (7, 0.2), (10, 0.4), (13, 0.6), (16, 0.8), (26, 1.0)
     ]
     _BACKPIKE_BREAKPOINTS = [
-        (0, 0.0), (5, 0.2), (10, 0.3), (20, 0.5), (30, 0.8), (45, 1.0)
+        (0, 0.0), (7, 0.2), (13, 0.3), (25, 0.5), (38, 0.8), (55, 1.0)
     ]
+    # Tier BOUNDARIES (1° / 5° / 15°) are judge-confirmed ("1-5° = small,
+    # 5-14° = medium, 15°+ = large") — kept as-is. Only the magnitudes,
+    # which the calibration log explicitly marks as an unconfirmed first
+    # pass ("assumes small=-0.1, medium=-0.3, large=-0.5 ... CONFIRM"),
+    # are eased down one 0.1-step each on the medium/large tiers.
     _BEND_DEVIATION_BREAKPOINTS = [
-        (0, 0.0), (1, 0.1), (5, 0.3), (15, 0.5),
+        (0, 0.0), (1, 0.1), (5, 0.2), (15, 0.4),
     ]
 
     def _abs_vertical_alignment(self, tilt):
@@ -409,29 +418,38 @@ class BarracudaScorer:
             deviation_degrees, self._BEND_DEVIATION_BREAKPOINTS, unknown_default=0.3
         )
 
-    # FIX: previously took the raw joint angle (180° = straight) directly,
-    # with breakpoints covering only 0-30°. A real swimmer's back angle is
-    # almost always 100-180° in a back layout, which is entirely outside
-    # that 0-30° domain — so every real figure silently clamped to 0
-    # deduction regardless of actual roundness. Now uses DEVIATION from
-    # straight (180 - angle) instead, matching how leg/ankle extension
-    # already work, so the breakpoint domain overlaps with realistic
-    # values. The judges' one confirmed number — "less than 30 degrees
-    # back will be rounded" — is read here as "30°+ of deviation from
-    # straight counts as rounded." Point values beyond that are still this
-    # file's placeholder guess (see calibration log at the top).
+    # FIX (not just leniency): previously took the raw joint angle
+    # (180° = straight) directly, with breakpoints covering only 0-30°.
+    # A real swimmer's back angle is almost always 100-180° in a back
+    # layout, which is entirely outside that 0-30° domain — so every
+    # real figure silently clamped to 0 deduction regardless of actual
+    # roundness. Now uses DEVIATION from straight (180 - angle) instead,
+    # matching how leg/ankle extension already work.
+    #
+    # The judges' stated rule was "less than 30 degrees back will be
+    # rounded" — read as: deviation under 30° is NOT rounded and should
+    # take no deduction. The breakpoints were still deducting well
+    # before 30° (0.2 already at just 15° deviation), which doesn't
+    # match that rule — this isn't just "a little harsh", it's applying
+    # a deduction the judges' own cutoff says shouldn't apply yet. Fixed
+    # to hold at 0 until 30°, matching the stated rule; the magnitude
+    # scale past 30° is still this file's placeholder guess (see
+    # calibration log at the top).
     _BACK_ROUNDNESS_BREAKPOINTS = [
-        (0, 0.0), (15, 0.2), (30, 0.4), (50, 0.6),
+        (0, 0.0), (30, 0.0), (40, 0.2), (50, 0.4), (65, 0.6),
     ]
 
     def _abs_back_roundness(self, deviation_degrees):
         return self._graduated_deduction(deviation_degrees, self._BACK_ROUNDNESS_BREAKPOINTS, unknown_default=0.3)
 
+    # Both explicitly flagged in the calibration log as "no thresholds
+    # or point values given yet" — already unconfirmed guesses, widened
+    # per the same leniency feedback.
     _TRAVEL_BREAKPOINTS = [
-        (0.00, 0.0), (0.05, 0.2), (0.10, 0.5), (0.15, 1.0),
+        (0.00, 0.0), (0.08, 0.2), (0.14, 0.5), (0.20, 1.0),
     ]
     _UNROLL_SPEED_RATIO_BREAKPOINTS = [
-        (0.5, 0.0), (0.8, 0.1), (1.0, 0.3), (1.3, 0.5),
+        (0.5, 0.0), (0.9, 0.1), (1.15, 0.3), (1.5, 0.5),
     ]
 
     def _abs_travel(self, hip_x_range):
