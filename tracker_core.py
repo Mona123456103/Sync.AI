@@ -44,6 +44,8 @@ import pandas as pd
 from pathlib import Path
 import os
 import time
+import subprocess
+import shutil
 
 # ============================================================================
 # SHARED CONFIG
@@ -69,30 +71,65 @@ def _output_video_size(w, h, max_width=MAX_OUTPUT_VIDEO_WIDTH):
     return max_width, max(2, int(round(h * scale)) // 2 * 2)  # keep height even (codec-friendly)
 
 
-def _open_browser_compatible_writer(output_path, fps, size):
-    """PLAYBACK FIX: all three video-writing call sites were using the
-    'mp4v' FourCC (MPEG-4 Part 2) — this produces a structurally valid
-    .mp4 file, but that codec isn't reliably decodable by browsers'
-    native <video> element (what st.video() renders), which is exactly
-    what "click play and nothing happens" looks like even though the
-    file itself downloads fine and plays in a desktop player like VLC.
-
-    Tries H.264 ('avc1') first, which browsers play natively — falls
-    back to 'mp4v' only if this OpenCV build genuinely doesn't have an
-    H.264 encoder available (common on some minimal/CPU-only builds),
-    so video writing still succeeds either way; playback in that
-    fallback case may need a download instead of inline play, same as
-    before this fix."""
-    for fourcc_str in ('avc1', 'H264', 'mp4v'):
-        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-        writer = cv2.VideoWriter(str(output_path), fourcc, fps, size)
-        if writer.isOpened():
-            return writer
-        writer.release()
-    # Last resort — some builds under-report isOpened() but still write
-    # valid output, so don't leave the caller with no writer at all.
+def _open_video_writer(output_path, fps, size):
+    """Writes with mp4v — virtually universally supported by any OpenCV
+    build for WRITING, even though it's not reliably browser-playable on
+    its own. That's fine here: this is a RAW intermediate file that
+    _finalize_video_for_browser() below re-encodes into something
+    browsers can actually play. Trying to get OpenCV itself to produce
+    a browser-ready file directly (by picking a different FourCC) isn't
+    enough on its own even when it works — see that function's
+    docstring for the second, separate reason browsers can fail to play
+    an OpenCV-written H.264 file too."""
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     return cv2.VideoWriter(str(output_path), fourcc, fps, size)
+
+
+def _finalize_video_for_browser(raw_path, final_path):
+    """PLAYBACK FIX. Two separate problems, both fixed here:
+
+    1. Codec: OpenCV's own writer (see _open_video_writer) uses 'mp4v'
+       (MPEG-4 Part 2), which browsers' native <video> element (what
+       st.video() renders) generally can't decode — "click play, 0:00,
+       nothing happens" while the same file plays fine in a desktop
+       player like VLC.
+    2. Even when OpenCV DOES write proper H.264, it commonly places the
+       file's moov atom (the metadata index a browser needs before it
+       can start playback/seeking) at the END of the file rather than
+       the start. This is a well-known, SEPARATE cause of the exact
+       same "0:00, play does nothing" symptom, and picking a different
+       FourCC alone does not fix it.
+
+    Re-encoding through the ffmpeg CLI (now in packages.txt) with
+    `-movflags +faststart` solves both at once: it transcodes to
+    H.264/yuv420p (the most broadly browser-compatible combination,
+    rather than trusting whatever OpenCV's build happened to produce)
+    AND moves the metadata index to the front of the file.
+
+    Falls back to just using the raw OpenCV output directly if ffmpeg
+    isn't available or the re-encode fails for any reason, so video
+    processing never hard-fails because of this step — playback would
+    then have the same limitation as before this fix, rather than the
+    whole run erroring out."""
+    raw_path = str(raw_path)
+    final_path = str(final_path)
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', raw_path,
+             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+             '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+             '-an', final_path],
+            capture_output=True, timeout=300,
+        )
+        if result.returncode == 0 and os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+            if raw_path != final_path and os.path.exists(raw_path):
+                os.remove(raw_path)
+            return
+    except Exception:
+        pass
+    # ffmpeg missing or the re-encode failed — fall back to the raw file.
+    if raw_path != final_path:
+        shutil.move(raw_path, final_path)
 
 MAX_FRAMES_LOST = 30
 SHORT_GAP_HOLD_FRAMES = 5   # hold last known position through brief gaps only
@@ -1479,7 +1516,8 @@ def process_video_above_water(input_path, output_path, water_level=None,
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     out_w, out_h = _output_video_size(w, h)
-    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
+    raw_output_path = output_path.parent / f"{output_path.stem}_raw{output_path.suffix}"
+    out = _open_video_writer(raw_output_path, fps, (out_w, out_h))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_count = 0
@@ -1498,6 +1536,7 @@ def process_video_above_water(input_path, output_path, water_level=None,
 
     cap.release()
     out.release()
+    _finalize_video_for_browser(raw_output_path, output_path)
 
     df = tracker.get_dataframe()
     csv_path = output_path.parent / f"{output_path.stem}_data.csv"
@@ -1525,7 +1564,8 @@ def process_video_underwater(input_path, output_path, water_level=None,
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_w, out_h = _output_video_size(w, h)
-    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
+    raw_output_path = output_path.parent / f"{output_path.stem}_raw{output_path.suffix}"
+    out = _open_video_writer(raw_output_path, fps, (out_w, out_h))
 
     frame_count = 0
     while frame_count < max_frames:
@@ -1543,6 +1583,7 @@ def process_video_underwater(input_path, output_path, water_level=None,
 
     cap.release()
     out.release()
+    _finalize_video_for_browser(raw_output_path, output_path)
 
     df = tracker.get_dataframe()
     csv_path = output_path.parent / f"{output_path.stem}_data.csv"
@@ -1864,7 +1905,8 @@ def process_video_walticam(input_path, output_path, mode='performance',
     max_frames = min(int(max_duration * fps), total) if max_duration else total
 
     out_w, out_h = _output_video_size(w, h)
-    out = _open_browser_compatible_writer(output_path, fps, (out_w, out_h))
+    raw_output_path = output_path.parent / f"{output_path.stem}_raw{output_path.suffix}"
+    out = _open_video_writer(raw_output_path, fps, (out_w, out_h))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_count = 0
@@ -1898,6 +1940,7 @@ def process_video_walticam(input_path, output_path, mode='performance',
 
     cap.release()
     out.release()
+    _finalize_video_for_browser(raw_output_path, output_path)
 
     # ACCURACY FIX (Walticam): see WALTICAM_LOCK_MATCH_DISTANCE's comment
     # above — same reasoning applies to Kalman smoothing's outlier
