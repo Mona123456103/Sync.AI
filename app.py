@@ -537,13 +537,13 @@ def render_home():
     st.markdown('<div class="sa-section-label">What gets measured</div>', unsafe_allow_html=True)
     st.write(
         "Ascent and descent alignment, backpike, leg extension, ankle "
-        "extension, back roundness, travel, and unroll speed all count "
-        "toward the official score, blended between a fixed technical "
-        "standard and how the figure compares to others scored in the "
-        "same batch. Head tuck and back-layout depth are measured but not "
-        "yet counted, pending exact judging criteria — nothing is hidden, "
-        "every measured number is shown, whether or not it currently "
-        "affects the score."
+        "extension, back roundness, travel, unroll speed, underwater bent "
+        "knee, back layout depth, and head tuck all count toward the "
+        "score, blended between a fixed technical standard and how the "
+        "figure compares to others scored in the same batch. Nothing is "
+        "hidden — every measured number is shown, and any figure worth 0.5 "
+        "or more on a category gets a plain-language note on what to work "
+        "on."
     )
 
     st.markdown('<div class="sa-section-label">Run it without the wait</div>', unsafe_allow_html=True)
@@ -736,34 +736,60 @@ def render_analyze():
             })
 
         d = result["deductions"]
-        scored_rows = [
-            ("Ascent alignment", d.get("ascent_alignment", 0), d.get("ascent_alignment_degrees")),
-            ("Descent alignment", d.get("descent_alignment", 0), d.get("descent_alignment_degrees")),
-            ("Backpike", d.get("backpike", 0), d.get("backpike_degrees")),
-            ("Leg extension", d.get("leg_extension", 0), d.get("leg_extension_degrees")),
-            ("Ankle extension", d.get("ankle_extension", 0), d.get("ankle_extension_degrees")),
-            ("Back roundness", d.get("back_roundness", 0), d.get("back_roundness_degrees")),
-            ("Travel", d.get("travel", 0), d.get("travel_degrees")),
-            ("Unroll speed", d.get("unroll_speed", 0), d.get("unroll_speed_degrees")),
+        # All categories now count toward the score (INCLUDE_COACHING_IN_SCORE
+        # is True in scorer.py), so they're shown as one combined breakdown
+        # rather than split into "official" vs "coaching-only" tables.
+        all_rows = [
+            ("Ascent alignment", "ascent_alignment", "ascent_alignment_degrees"),
+            ("Descent alignment", "descent_alignment", "descent_alignment_degrees"),
+            ("Backpike", "backpike", "backpike_degrees"),
+            ("Leg extension", "leg_extension", "leg_extension_degrees"),
+            ("Ankle extension", "ankle_extension", "ankle_extension_degrees"),
+            ("Back roundness", "back_roundness", "back_roundness_degrees"),
+            ("Travel", "travel", "travel_degrees"),
+            ("Unroll speed", "unroll_speed", "unroll_speed_degrees"),
+            ("Underwater bent knee", "underwater_bent_knee", "underwater_bent_knee_degrees"),
+            ("Back layout depth (estimated — not judge-confirmed)", "back_layout_depth", "back_layout_depth_value"),
+            ("Head tuck (estimated — not judge-confirmed)", "head_tuck", "head_tuck_degrees"),
         ]
-        st.markdown("**Official deductions**")
+        st.markdown("**Deductions**")
         st.table({
-            "Category": [r[0] for r in scored_rows],
-            "Deduction": [f"-{r[1]:.2f}" if r[1] else "None" for r in scored_rows],
-            "Measured": [f"{r[2]:.2f}" if r[2] is not None else "None" for r in scored_rows],
+            "Category": [label for label, _, _ in all_rows],
+            "Deduction": [f"-{d.get(key, 0):.2f}" if d.get(key, 0) else "None" for _, key, _ in all_rows],
+            "Measured": [
+                f"{d[deg_key]:.2f}" if d.get(deg_key) is not None else "None"
+                for _, _, deg_key in all_rows
+            ],
         })
 
-        coaching_rows = [
-            ("Underwater bent knee", d.get("underwater_bent_knee", 0), d.get("underwater_bent_knee_degrees")),
-            ("Back layout depth (estimated — not judge-confirmed)", d.get("back_layout_depth", 0), d.get("back_layout_depth_value")),
-            ("Head tuck (estimated — not judge-confirmed)", d.get("head_tuck", 0), d.get("head_tuck_degrees")),
+        # Coaching feedback: whichever categories are actually costing
+        # real points (>=0.5) get a plain-language "what to work on" tip
+        # instead of just a number, so this reads as something to act on
+        # rather than another row of the same table.
+        FIX_TIPS = {
+            "ascent_alignment": "Keep your body vertical on the way up — avoid leaning to either side during the rise.",
+            "descent_alignment": "Stay vertical on the way down too — a tilt during descent is graded the same as one during ascent.",
+            "backpike": "Keep hips and legs in one straight line after the peak — avoid piking or bending at the hips on the way down.",
+            "leg_extension": "Work on fully straightening your knees — eliminate any bend during the figure.",
+            "ankle_extension": "Point your toes and fully extend your ankles.",
+            "back_roundness": "Keep your back flat in the layout position — avoid arching or rounding at the stomach.",
+            "travel": "Work on staying in one spot — minimize lateral drift during the figure.",
+            "unroll_speed": "Control your descent — come down slower than you went up, don't rush the unroll.",
+            "underwater_bent_knee": "Keep your knees straight underwater too — it affects body line even where it's harder for a judge to see.",
+            "back_layout_depth": "Try not to sink too deep in the layout — stay closer to the surface.",
+            "head_tuck": "Keep your head in a neutral position — avoid tucking your chin toward your chest.",
+        }
+        significant = [
+            (label, key, d.get(key, 0)) for label, key, _ in all_rows
+            if d.get(key, 0) >= 0.5
         ]
-        st.markdown("**Coaching feedback** (measured, not counted toward the score)")
-        st.table({
-            "Category": [r[0] for r in coaching_rows],
-            "Deduction": [f"-{r[1]:.2f}" if r[1] else "None" for r in coaching_rows],
-            "Measured": [f"{r[2]:.2f}" if r[2] is not None else "None" for r in coaching_rows],
-        })
+        st.markdown("**Worth working on** (deductions of 0.5 or more)")
+        if significant:
+            for label, key, value in sorted(significant, key=lambda r: r[2], reverse=True):
+                tip = FIX_TIPS.get(key, "")
+                st.markdown(f"- **{label}** (-{value:.2f}): {tip}")
+        else:
+            st.caption("No deductions of 0.5 or more on this figure.")
 
         if below_kalman_csv is None:
             st.caption(
@@ -1159,12 +1185,13 @@ if st.session_state.page != "analyze":
 
             Scoring is FINA-aligned: a base score from jump height, minus
             deductions for alignment, backpike, leg/ankle extension, back
-            roundness, travel, and unroll speed, blended 70 percent
-            absolute (fixed thresholds) and 30 percent relative (how this
-            figure compares to others scored in the same batch). Walticam
-            mode uses a body-length-normalized height metric instead of
-            the raw frame-fraction one, since a split-frame camera has a
-            different field of view than a dedicated above-water camera.
+            roundness, travel, unroll speed, underwater bent knee, back
+            layout depth, and head tuck — blended 70 percent absolute
+            (fixed thresholds) and 30 percent relative (how this figure
+            compares to others scored in the same batch). Walticam mode
+            uses a body-length-normalized height metric instead of the raw
+            frame-fraction one, since a split-frame camera has a different
+            field of view than a dedicated above-water camera.
 
             Every scored figure is saved to History for later reference.
             """
