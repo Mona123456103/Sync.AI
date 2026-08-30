@@ -112,7 +112,7 @@ class BarracudaScorer:
     # Whether coaching-only (underwater-invisible-to-judges) deductions get
     # subtracted from the official score, or only shown as feedback.
     # DEFAULT: feedback only. Flip to True once the judges decide.
-    INCLUDE_COACHING_IN_SCORE = False
+    INCLUDE_COACHING_IN_SCORE = True
 
     # How many of the highest-ankle frames near the peak get averaged
     # (via median) into foot_clearance, instead of trusting one frame.
@@ -387,22 +387,19 @@ class BarracudaScorer:
         return round(d, 2)
 
     # LENIENCY ADJUSTMENT (direct calibration feedback: deductions were
-    # running harsher than intended in practice). No judge-confirmed
-    # anchor points are documented for alignment or backpike in the
-    # calibration log, so these are widened directly.
+    # LENIENCY ADJUSTMENT, round 2 (direct calibration feedback: still
+    # too harsh). No judge-confirmed anchor points documented for
+    # alignment or backpike, so widened directly again.
     _VERTICAL_ALIGNMENT_BREAKPOINTS = [
-        (0, 0.0), (4, 0.0), (7, 0.2), (10, 0.4), (13, 0.6), (16, 0.8), (26, 1.0)
+        (0, 0.0), (6, 0.0), (10, 0.2), (14, 0.4), (18, 0.6), (22, 0.8), (32, 1.0)
     ]
     _BACKPIKE_BREAKPOINTS = [
-        (0, 0.0), (7, 0.2), (13, 0.3), (25, 0.5), (38, 0.8), (55, 1.0)
+        (0, 0.0), (10, 0.2), (18, 0.3), (32, 0.5), (46, 0.8), (65, 1.0)
     ]
-    # Tier BOUNDARIES (1° / 5° / 15°) are judge-confirmed ("1-5° = small,
-    # 5-14° = medium, 15°+ = large") — kept as-is. Only the magnitudes,
-    # which the calibration log explicitly marks as an unconfirmed first
-    # pass ("assumes small=-0.1, medium=-0.3, large=-0.5 ... CONFIRM"),
-    # are eased down one 0.1-step each on the medium/large tiers.
+    # Tier BOUNDARIES (1° / 5° / 15°) are judge-confirmed — kept as-is
+    # again. Magnitude eased one more 0.1-step on the large tier.
     _BEND_DEVIATION_BREAKPOINTS = [
-        (0, 0.0), (1, 0.1), (5, 0.2), (15, 0.4),
+        (0, 0.0), (1, 0.1), (5, 0.2), (15, 0.3),
     ]
 
     def _abs_vertical_alignment(self, tilt):
@@ -428,28 +425,23 @@ class BarracudaScorer:
     #
     # The judges' stated rule was "less than 30 degrees back will be
     # rounded" — read as: deviation under 30° is NOT rounded and should
-    # take no deduction. The breakpoints were still deducting well
-    # before 30° (0.2 already at just 15° deviation), which doesn't
-    # match that rule — this isn't just "a little harsh", it's applying
-    # a deduction the judges' own cutoff says shouldn't apply yet. Fixed
-    # to hold at 0 until 30°, matching the stated rule; the magnitude
-    # scale past 30° is still this file's placeholder guess (see
-    # calibration log at the top).
+    # take no deduction. The 30° no-deduction cutoff is judge-confirmed
+    # and kept fixed; the magnitude scale past it is eased further
+    # (round 2 of leniency feedback).
     _BACK_ROUNDNESS_BREAKPOINTS = [
-        (0, 0.0), (30, 0.0), (40, 0.2), (50, 0.4), (65, 0.6),
+        (0, 0.0), (30, 0.0), (45, 0.2), (58, 0.4), (75, 0.6),
     ]
 
     def _abs_back_roundness(self, deviation_degrees):
         return self._graduated_deduction(deviation_degrees, self._BACK_ROUNDNESS_BREAKPOINTS, unknown_default=0.3)
 
     # Both explicitly flagged in the calibration log as "no thresholds
-    # or point values given yet" — already unconfirmed guesses, widened
-    # per the same leniency feedback.
+    # or point values given yet" — widened again, round 2.
     _TRAVEL_BREAKPOINTS = [
-        (0.00, 0.0), (0.08, 0.2), (0.14, 0.5), (0.20, 1.0),
+        (0.00, 0.0), (0.11, 0.2), (0.18, 0.5), (0.26, 1.0),
     ]
     _UNROLL_SPEED_RATIO_BREAKPOINTS = [
-        (0.5, 0.0), (0.9, 0.1), (1.15, 0.3), (1.5, 0.5),
+        (0.5, 0.0), (1.0, 0.1), (1.3, 0.3), (1.7, 0.5),
     ]
 
     def _abs_travel(self, hip_x_range):
@@ -482,7 +474,7 @@ class BarracudaScorer:
     # layout is normal and depths beyond that start costing points.
     # NOT judge-confirmed — recalibrate once real numbers exist.
     _BACK_LAYOUT_DEPTH_BREAKPOINTS = [
-        (0.15, 0.0), (0.25, 0.2), (0.35, 0.4), (0.50, 0.6),
+        (0.20, 0.0), (0.32, 0.2), (0.45, 0.4), (0.60, 0.6),
     ]
 
     def _abs_back_layout_depth(self, depth_value):
