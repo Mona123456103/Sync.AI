@@ -146,11 +146,25 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Fill the sides instead of leaving them stark white on wide screens */
+    /* Fill the sides instead of leaving them stark white on wide screens.
+       color is set here too, at the true root of everything Streamlit
+       renders — a lot of native components (progress bar text, spinner
+       text, etc.) use color:inherit rather than setting their own
+       value, and chasing each one's specific data-testid has been
+       unreliable (Streamlit's internal DOM structure differs enough
+       between versions that a selector verified against one version
+       doesn't always match what's actually deployed). Setting the
+       color at the root instead relies only on ordinary CSS
+       inheritance, which works regardless of exactly how many wrapper
+       elements sit in between. Elements that set their OWN explicit
+       color (tables, radio option text, widget labels) still need
+       their own direct override below — this only fixes the ones that
+       were never overriding it in the first place. */
     .stApp {
         background: radial-gradient(circle at 12% 8%, rgba(8,145,178,0.05), transparent 45%),
                     radial-gradient(circle at 88% 92%, rgba(14,116,144,0.05), transparent 45%),
                     #fbfdfe;
+        color: #0f172a !important;
     }
     .block-container { padding-top: 4rem; padding-bottom: 3rem; max-width: 1040px; }
     h1, h2, h3 { letter-spacing: -0.01em; }
@@ -256,8 +270,16 @@ st.markdown(
         [data-testid="stCaptionContainer"],
         [data-testid="stWidgetLabel"],
         [data-testid="stMetricLabel"],
-        [data-testid="stMetricValue"]
+        [data-testid="stMetricValue"],
+        [data-testid="stProgress"],
+        [data-testid="stSpinner"]
     ) { color: #0f172a !important; }
+
+    /* st.table() renders an actual <table> that sets its own explicit
+       text color (not inherited), so the broad reset above can't reach
+       it — this was the "Official deductions" / "Coaching feedback"
+       tables rendering nearly invisible. */
+    table[data-testid="stTableStyledTable"] { color: #0f172a !important; }
 
     /* Radio option text ("Walticam" / "Above / Below" etc.) sits in an
        inner <div> that sets its own color directly from the same theme
@@ -723,7 +745,6 @@ def render_analyze():
             ("Back roundness", d.get("back_roundness", 0), d.get("back_roundness_degrees")),
             ("Travel", d.get("travel", 0), d.get("travel_degrees")),
             ("Unroll speed", d.get("unroll_speed", 0), d.get("unroll_speed_degrees")),
-            ("Head tuck (not yet calibrated)", d.get("head_tuck", 0), d.get("head_tuck_degrees")),
         ]
         st.markdown("**Official deductions**")
         st.table({
@@ -734,7 +755,8 @@ def render_analyze():
 
         coaching_rows = [
             ("Underwater bent knee", d.get("underwater_bent_knee", 0), d.get("underwater_bent_knee_degrees")),
-            ("Back layout depth (not yet calibrated)", d.get("back_layout_depth", 0), d.get("back_layout_depth_value")),
+            ("Back layout depth (estimated — not judge-confirmed)", d.get("back_layout_depth", 0), d.get("back_layout_depth_value")),
+            ("Head tuck (estimated — not judge-confirmed)", d.get("head_tuck", 0), d.get("head_tuck_degrees")),
         ]
         st.markdown("**Coaching feedback** (measured, not counted toward the score)")
         st.table({
