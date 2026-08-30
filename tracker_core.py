@@ -75,6 +75,25 @@ RELOCK_DRIFT_THRESHOLD = 0.15
 LOCK_MATCH_DISTANCE = 0.15
 MIN_FOREGROUND_SIZE_RATIO = 0.60
 
+# ACCURACY FIX (Walticam): a Walticam video is ONE camera frame split
+# top/bottom (above/below) — process_video_walticam does
+# `frame_top = frame[:split_y, :]` where split_y = h // 2, so the
+# above-water half is HALF the height of a real above-water camera
+# frame. All of WalticamAboveTracker/BelowTracker's normalized
+# coordinates are computed relative to THAT halved height, meaning the
+# same real vertical jump covers roughly DOUBLE the normalized distance
+# there compared to a dedicated full-frame above-water camera. Reusing
+# the same 0.15 thresholds (tuned for a full-height frame) for Walticam
+# was therefore effectively tighter than intended, relative to real
+# motion — SwimmerLock could lose/fail to relock onto the swimmer during
+# exactly the fast vertical motion a barracuda jump is made of. These
+# are used ONLY by SwimmerLock, which only WalticamAboveTracker /
+# WalticamBelowTracker use — the single-video above-water and
+# underwater trackers keep the original 0.15 values above, which are
+# already correctly scaled for their full-height frames.
+WALTICAM_LOCK_MATCH_DISTANCE = 0.28
+WALTICAM_RELOCK_DRIFT_THRESHOLD = 0.28
+
 
 def make_pose_tracker(mode='performance', det_frequency=1):
     """COCO-17 (Body) tracker — used by the single above/underwater
@@ -297,7 +316,18 @@ def is_in_water_lenient(hip_x_norm, hip_y_norm, water_level, frame):
 
     if hip_y_norm < 0.35:
         return False
-    if hip_y_norm < water_level - 0.15:
+    # ACCURACY FIX (above-water): was `water_level - 0.15` — the height
+    # chart in scorer.py goes up to 0.33 frame-fraction clearance for a
+    # top base score, so a genuinely good jump can rise well past 0.15
+    # above the waterline. This was a coarse pre-filter meant to catch
+    # someone standing on the pool deck before bothering with the real
+    # water-color check below — but at 0.15 it could reject a legitimate
+    # high jump before that color check even runs. Loosened to give real
+    # jumps comfortable headroom; the actual water-color sampling a few
+    # lines down is what does the real work of telling a swimmer from a
+    # person on deck (who won't have real water immediately below them),
+    # so this pre-filter doesn't need to carry that burden alone.
+    if hip_y_norm < water_level - 0.40:
         return False
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -375,7 +405,24 @@ def select_best_swimmer_coco(all_keypoints, all_scores, water_level, frame, igno
             continue
         if hip_x < 0.15 or hip_x > 0.85:
             continue
-        if hip_y < water_level - 0.10:
+        # ACCURACY FIX (above-water): was `water_level - 0.10` — this is
+        # the tighter of the two above-water height gates (see
+        # is_in_water_lenient for the other). At 0.10 clearance, this
+        # would hard-reject a swimmer at the peak of a genuinely good
+        # jump — exactly the moment that matters most for foot_clearance
+        # / base_score — and it matters doubly here because this runs
+        # not just at cold-start but as the FALLBACK re-acquisition path
+        # after the tracker loses lock (see AboveWaterRTMPoseTracker /
+        # RTMPoseUnderwaterTracker.process_frame). If lock is briefly
+        # lost during the fast ascent — plausible, since fast motion is
+        # exactly when detection confidence dips — re-acquisition could
+        # fail right through the peak if this gate is too tight, turning
+        # a brief gap into a lost peak. Loosened to comfortably clear a
+        # top-score jump (chart in scorer.py tops out at 0.33 clearance);
+        # is_in_water_lenient's real water-color check just below this
+        # still independently guards against a false match on someone
+        # standing on the pool deck.
+        if hip_y < water_level - 0.40:
             continue
         if not is_in_water_lenient(hip_x, hip_y, water_level, frame):
             continue
@@ -430,7 +477,7 @@ class SwimmerLock:
             return idx
 
     def _find_matching(self, keypoints, scores, h, w, is_valid_fn, sub_frame):
-        best_idx, best_dist = None, LOCK_MATCH_DISTANCE
+        best_idx, best_dist = None, WALTICAM_LOCK_MATCH_DISTANCE
         for i, (kps, sc) in enumerate(zip(keypoints, scores)):
             hip = get_hip_position(kps, sc, h, w)
             if hip is None or not validate_pose_anatomy_coco(kps, sc, h, w):
@@ -474,7 +521,7 @@ class SwimmerLock:
 
         fresh_hip = get_hip_position(keypoints[fresh_idx], scores[fresh_idx], h, w)
         drift = np.hypot(fresh_hip['x'] - self.locked['x'], fresh_hip['y'] - self.locked['y'])
-        if drift <= RELOCK_DRIFT_THRESHOLD:
+        if drift <= WALTICAM_RELOCK_DRIFT_THRESHOLD:
             self._pending_relock_idx, self._pending_relock_streak = None, 0
             return current_idx
 
@@ -564,7 +611,7 @@ class ImprovedKalmanFilter1D:
         return predicted
 
 
-def _kalman_filter_dataframe(df, landmarks):
+def _kalman_filter_dataframe(df, landmarks, outlier_threshold=None):
     """Same Kalman math and same sequential order as before — only the
     per-row access pattern changed. The old version called df.iterrows()
     once per joint-axis pass (~30 passes for a typical joint set), and
@@ -575,7 +622,11 @@ def _kalman_filter_dataframe(df, landmarks):
     the needed columns out as plain numpy arrays once per pass removes
     that overhead entirely — the numeric output is identical, only the
     access pattern changed (verified: see the numeric-equivalence test
-    this was checked against before deploying)."""
+    this was checked against before deploying).
+
+    outlier_threshold: overrides ImprovedKalmanFilter1D's default when
+    given — used to pass a wider threshold for Walticam's half-height
+    frames (see the call sites for why)."""
     n = len(df)
     for joint in landmarks:
         for axis in ['y', 'x']:
@@ -586,7 +637,7 @@ def _kalman_filter_dataframe(df, landmarks):
             first_idx = df[col].first_valid_index()
             if first_idx is None:
                 continue
-            kf = ImprovedKalmanFilter1D()
+            kf = ImprovedKalmanFilter1D() if outlier_threshold is None else ImprovedKalmanFilter1D(outlier_threshold=outlier_threshold)
             kf.x[0] = df.loc[first_idx, col]
             kf.initialized = True
 
@@ -1804,8 +1855,14 @@ def process_video_walticam(input_path, output_path, mode='performance',
     cap.release()
     out.release()
 
-    above_df = _kalman_filter_dataframe(above_tracker.get_dataframe(), ALL_LANDMARKS_WALTICAM_ABOVE)
-    below_df = _kalman_filter_dataframe(below_tracker.get_dataframe(), ALL_LANDMARKS_WALTICAM_BELOW)
+    # ACCURACY FIX (Walticam): see WALTICAM_LOCK_MATCH_DISTANCE's comment
+    # above — same reasoning applies to Kalman smoothing's outlier
+    # rejection. The default outlier_threshold (tuned for a full-height
+    # above-water frame) would clip more of a real jump's fast motion
+    # here than intended, since the same physical motion covers roughly
+    # double the normalized distance in this half-height frame.
+    above_df = _kalman_filter_dataframe(above_tracker.get_dataframe(), ALL_LANDMARKS_WALTICAM_ABOVE, outlier_threshold=0.40)
+    below_df = _kalman_filter_dataframe(below_tracker.get_dataframe(), ALL_LANDMARKS_WALTICAM_BELOW, outlier_threshold=0.40)
 
     above_csv = output_path.parent / f"{name}_above_tracking_data.csv"
     below_csv = output_path.parent / f"{name}_below_tracking_data.csv"
