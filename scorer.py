@@ -44,8 +44,15 @@ DECIDED (implemented below with real numbers):
 STILL OPEN (measured where possible, deduction values are TODO stubs — do
 NOT treat these numbers as judge-approved until confirmed):
   - Head tuck: no measurement definition or point values given yet.
+    UPDATE: now measured (shoulder-vertex angle between hip and nose,
+    deviation from 180°) and scored using the same small/medium/large
+    tiers judges gave for leg/ankle extension, as a placeholder
+    convention — NOT a judge-confirmed number. See _abs_head_tuck.
   - Back layout depth: "how far under should the swimmer be to receive a
     deduction, and how much deduction" — both blank in the notes.
+    UPDATE: now scored against a guessed depth breakpoint chart — NOT
+    judge-confirmed. See _abs_back_layout_depth /
+    _BACK_LAYOUT_DEPTH_BREAKPOINTS.
   - Unrolling motion quality (hips unroll smoothly, head follows, descent
     slower than the initial rise): implemented as a rough speed-ratio
     check, but no judge-approved thresholds/point values yet.
@@ -263,6 +270,22 @@ class BarracudaScorer:
         elif pd.notna(rx): return rx
         return None
 
+    def _single(self, row, name):
+        """For unpaired landmarks like 'nose' (stored as plain nose_x/
+        nose_y, not left_/right_-prefixed) — _avg_lr/_avg_lr_x don't
+        apply since there's nothing to average."""
+        v = row.get(f'{name}_y')
+        vis = row.get(f'{name}_visibility')
+        if pd.isna(v):
+            return None
+        if pd.notna(vis) and vis <= 0.1:
+            return None
+        return v
+
+    def _single_x(self, row, name):
+        v = row.get(f'{name}_x')
+        return v if pd.notna(v) else None
+
     def _collect(self, df, joint):
         return [v for v in (self._avg_lr(df.iloc[i], joint)
                 for i in range(len(df))) if v is not None]
@@ -419,15 +442,35 @@ class BarracudaScorer:
             descent_to_ascent_speed_ratio, self._UNROLL_SPEED_RATIO_BREAKPOINTS, unknown_default=0.0
         )
 
-    def _abs_head_tuck(self, _placeholder=None):
-        """STUB — no measurement definition or point values were given in
-        the meeting notes. Always returns 0 until this is calibrated."""
-        return 0.0
+    # ESTIMATED — no judge-given point values exist for head tuck (see
+    # calibration log at the top: "no measurement definition or point
+    # values given yet"). This reuses the SAME small/medium/large tiers
+    # judges gave for leg/ankle extension (_BEND_DEVIATION_BREAKPOINTS),
+    # since that's the only real judge-approved deduction scale in this
+    # file and head tuck is the same kind of "how far off straight"
+    # measurement. This is a placeholder convention, NOT a judge-
+    # confirmed number — replace with real thresholds once the judges
+    # give them, the same way leg/ankle extension were confirmed.
+    def _abs_head_tuck(self, deviation_degrees):
+        return self._graduated_deduction(
+            deviation_degrees, self._BEND_DEVIATION_BREAKPOINTS, unknown_default=0.0
+        )
 
-    def _abs_back_layout_depth(self, _placeholder=None):
-        """STUB — 'how far under should the swimmer be, and how much
-        deduction' were both left blank in the meeting notes."""
-        return 0.0
+    # ESTIMATED — the meeting notes left both "how far under" and "how
+    # much deduction" blank. These breakpoints are a first-pass guess:
+    # back_layout_depth_start is the swimmer's median hip depth (as a
+    # frame-fraction below the water_level=0.05 convention) during the
+    # first ~10 underwater frames, so 0.15-0.20 assumes a fairly shallow
+    # layout is normal and depths beyond that start costing points.
+    # NOT judge-confirmed — recalibrate once real numbers exist.
+    _BACK_LAYOUT_DEPTH_BREAKPOINTS = [
+        (0.15, 0.0), (0.25, 0.2), (0.35, 0.4), (0.50, 0.6),
+    ]
+
+    def _abs_back_layout_depth(self, depth_value):
+        return self._graduated_deduction(
+            depth_value, self._BACK_LAYOUT_DEPTH_BREAKPOINTS, unknown_default=0.0
+        )
 
     # ── Relative deduction ──
 
@@ -599,6 +642,26 @@ class BarracudaScorer:
             abs(180.0 - m['back_angle_median']) if m['back_angle_median'] is not None else None
         )
 
+        # Head tuck (ESTIMATED — see _abs_head_tuck for why). Angle at
+        # the shoulder between the spine line (down to the hip) and the
+        # neck/head line (up to the nose), same layout_window as back
+        # roundness. In a neutral streamlined position the nose roughly
+        # continues the spine's line (~180°); a tucked chin bends this
+        # angle away from that, same "deviation from straight" pattern
+        # used for leg/ankle extension and back roundness.
+        head_tuck_angles = []
+        for fn in layout_window:
+            row = ab.iloc[fn]
+            hx, hy = self._avg_lr_x(row, 'hip'), self._avg_lr(row, 'hip')
+            sx, sy = self._avg_lr_x(row, 'shoulder'), self._avg_lr(row, 'shoulder')
+            nx, ny = self._single_x(row, 'nose'), self._single(row, 'nose')
+            if all(v is not None for v in [hx, hy, sx, sy, nx, ny]):
+                head_tuck_angles.append(self._joint_angle((hx, hy), (sx, sy), (nx, ny)))
+        m['head_tuck_angle_median'] = np.median(head_tuck_angles) if head_tuck_angles else None
+        m['head_tuck_deviation'] = (
+            abs(180.0 - m['head_tuck_angle_median']) if m['head_tuck_angle_median'] is not None else None
+        )
+
         # Travel: hip x-range over the whole above-water clip
         hip_xs = [v for v in (self._avg_lr_x(ab.iloc[i], 'hip') for i in range(len(ab))) if v is not None]
         m['hip_travel_range'] = (max(hip_xs) - min(hip_xs)) if hip_xs else None
@@ -767,7 +830,7 @@ class BarracudaScorer:
                  self._abs_travel, higher_is_worse=True)
         blended('unroll_speed', m.get('unroll_speed_ratio'), 'unroll',
                  self._abs_unroll_speed, higher_is_worse=True)
-        blended('head_tuck', None, 'head_tuck',
+        blended('head_tuck', m.get('head_tuck_deviation'), 'head_tuck',
                  self._abs_head_tuck, higher_is_worse=True)
 
         hd = self._abs_bend_deviation(m.get('underwater_knee_deviation'))
@@ -775,7 +838,7 @@ class BarracudaScorer:
         d['underwater_bent_knee_degrees'] = (
             round(m['underwater_knee_deviation'], 1) if m.get('underwater_knee_deviation') is not None else None
         )
-        d['back_layout_depth'] = round(self._abs_back_layout_depth(), 2)
+        d['back_layout_depth'] = round(self._abs_back_layout_depth(m.get('back_layout_depth_start')), 2)
         d['back_layout_depth_value'] = m.get('back_layout_depth_start')
 
         return d
@@ -800,7 +863,7 @@ class BarracudaScorer:
             'back_roundness': [measurements[n].get('back_roundness_deviation') for n in measurements],
             'travel': [measurements[n].get('hip_travel_range') for n in measurements],
             'unroll': [measurements[n].get('unroll_speed_ratio') for n in measurements],
-            'head_tuck': [None for _ in measurements],
+            'head_tuck': [measurements[n].get('head_tuck_deviation') for n in measurements],
         }
 
         for name in sorted(self.figures.keys()):
