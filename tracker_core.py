@@ -495,7 +495,24 @@ class SwimmerLock:
 # ============================================================================
 
 class ImprovedKalmanFilter1D:
-    def __init__(self, process_var=0.001, measurement_var=0.05, outlier_threshold=0.15):
+    # ACCURACY TUNING (no effect on inference speed — this is pure
+    # post-processing on keypoints the model already produced, not an
+    # extra model call, so it doesn't touch mode/det_frequency at all).
+    #
+    # outlier_threshold was 0.15 (15% of frame height/width). A
+    # barracuda figure's whole point is an explosive, fast vertical
+    # jump — exactly the kind of large frame-to-frame position change
+    # this threshold exists to reject as tracking noise. At 0.15, a
+    # genuinely fast rise could get misclassified as an outlier and
+    # replaced with the filter's more conservative predicted value
+    # instead of the real measurement, clipping the true peak — which
+    # would show up as an UNDERESTIMATED foot_clearance, and therefore
+    # a lower base_score, for exactly the swimmers with the most
+    # explosive jumps. Raised to 0.22 so real jump speed passes through
+    # while still catching genuine tracking glitches (a mis-lock onto a
+    # different point is typically a much larger, near-instantaneous
+    # jump than this).
+    def __init__(self, process_var=0.001, measurement_var=0.05, outlier_threshold=0.22):
         self.x = np.array([0.0, 0.0])
         self.P = np.eye(2) * 1.0
         self.Q = np.array([[process_var, 0], [0, process_var * 0.1]])
