@@ -787,14 +787,18 @@ class BarracudaScorer:
         """OFFICIAL categories — subtracted from the score."""
         keys = ['ascent_alignment', 'descent_alignment', 'backpike',
                 'leg_extension', 'ankle_extension', 'back_roundness',
-                'travel', 'unroll_speed', 'head_tuck']
+                'travel', 'unroll_speed']
         if self.INCLUDE_COACHING_IN_SCORE:
             keys = keys + self._coaching_deduction_keys()
         return keys
 
     def _coaching_deduction_keys(self):
-        """Underwater-only categories judges normally can't see."""
-        return ['underwater_bent_knee', 'back_layout_depth']
+        """Underwater-only categories judges normally can't see, PLUS
+        head_tuck — head_tuck is measured now (see _abs_head_tuck) but
+        its point values are still an ESTIMATED, not judge-confirmed,
+        placeholder, same as back_layout_depth, so it stays out of the
+        official score for the same reason until real numbers exist."""
+        return ['underwater_bent_knee', 'back_layout_depth', 'head_tuck']
 
     def _compute_all_deductions(self, m, group_values=None):
         d = {}
