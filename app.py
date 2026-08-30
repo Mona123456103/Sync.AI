@@ -653,7 +653,9 @@ def render_analyze():
     def show_results(label, video_path, csv_path, landmarks):
         kalman_csv = tc.apply_kalman_filter_to_csv(csv_path, landmarks)
         st.success(f"{label} processing complete.")
-        st.video(str(video_path))
+        vcol, _ = st.columns([1, 1])
+        with vcol:
+            st.video(str(video_path))
         col1, col2 = st.columns(2)
         with col1:
             with open(video_path, "rb") as f:
@@ -838,7 +840,9 @@ def render_analyze():
                         below_kalman = tc.apply_kalman_filter_to_csv(below_csv, tc.ALL_LANDMARKS_ABOVE)
 
                         st.success("Walticam processing complete.")
-                        st.video(str(video_file))
+                        vcol, _ = st.columns([1, 1])
+                        with vcol:
+                            st.video(str(video_file))
 
                         col1, col2, col3 = st.columns(3)
                         with col1:
