@@ -586,9 +586,9 @@ def render_model_preload_control():
     with col2:
         if st.button("Load pose model now", use_container_width=True):
             with st.spinner("Loading pose model..."):
-                _cached_pose_tracker("lightweight", 4)
-                _cached_pose_tracker_halpe("lightweight", 4, "above")
-                _cached_pose_tracker_halpe("lightweight", 4, "below")
+                _cached_pose_tracker("balanced", 4)
+                _cached_pose_tracker_halpe("balanced", 4, "above")
+                _cached_pose_tracker_halpe("balanced", 4, "below")
             st.session_state.models_preloaded = True
             st.rerun()
 
@@ -615,8 +615,16 @@ def render_analyze():
     # detector was letting the tracker drift onto — and then stay
     # locked onto — background clutter for several frames at a time
     # instead of getting a fresh chance to re-identify the real
-    # swimmer. mode stays "lightweight" (unchanged).
-    chosen = dict(mode="lightweight", det_frequency=3)
+    # swimmer. Kept at 3 per explicit request even after this.
+    #
+    # mode was "lightweight" — this is the actual pose-ESTIMATION
+    # network (which joint goes where), and unlike det_frequency it
+    # runs on every single frame regardless of that setting, so it's a
+    # much bigger accuracy lever. Bumped to "balanced" after direct
+    # confirmation that the same footage tracks noticeably better
+    # outside this app (very likely running a larger/more accurate
+    # mode there) — det_frequency alone couldn't explain that gap.
+    chosen = dict(mode="balanced", det_frequency=3)
     waterline_value = None
     max_duration = 60
 
