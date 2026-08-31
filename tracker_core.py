@@ -323,6 +323,63 @@ def validate_pose_anatomy_coco(person_kps, person_scores, h, w):
     return True
 
 
+def validate_limb_proportions_coco(person_kps, person_scores, h, w, conf_thresh=0.10):
+    """ACCURACY ADD: neither validate_pose_anatomy_coco (shoulder-above-hip,
+    hip-width bounds) nor calculate_pose_size_coco (a single aggregate
+    'size' score) check whether a candidate's actual limb LENGTHS look
+    like a human body — a false-positive detection on background
+    structure (railings, ceiling equipment) can have a few points in
+    individually-plausible positions while the overall shape is nothing
+    like a person: e.g. a torso that's tiny compared to the 'thigh', or
+    a 'shin' many times longer than the 'thigh'. This checks torso
+    (shoulder-mid to hip-mid), thigh (hip-mid to knee-mid), and shin
+    (knee-mid to ankle-mid) against each other — real proportions vary
+    with camera angle and how extended a limb is, so this stays
+    deliberately loose (a real leg fully extended vertically can look
+    very different from one bent), but it does catch shapes that aren't
+    in the same ballpark at all. Segments with insufficient confidence
+    are skipped rather than failing the check — this only rejects when
+    it has enough data to say the shape looks wrong, same spirit as the
+    existing anatomy check."""
+
+    def _mid(i1, i2):
+        if person_scores[i1] <= conf_thresh or person_scores[i2] <= conf_thresh:
+            return None
+        return (
+            (person_kps[i1][0] + person_kps[i2][0]) / 2 / w,
+            (person_kps[i1][1] + person_kps[i2][1]) / 2 / h,
+        )
+
+    def _dist(p1, p2):
+        return None if p1 is None or p2 is None else np.hypot(p1[0] - p2[0], p1[1] - p2[1])
+
+    shoulder_mid = _mid(5, 6)
+    hip_mid = _mid(11, 12)
+    knee_mid = _mid(13, 14)
+    ankle_mid = _mid(15, 16)
+
+    torso = _dist(shoulder_mid, hip_mid)
+    thigh = _dist(hip_mid, knee_mid)
+    shin = _dist(knee_mid, ankle_mid)
+
+    # Torso vs thigh: a real torso is very rarely more than ~4x a real
+    # thigh, or less than ~1/4 of one, at any camera angle or leg
+    # extension.
+    if torso is not None and thigh is not None and thigh > 0.01:
+        ratio = torso / thigh
+        if ratio > 4.0 or ratio < 0.25:
+            return False
+
+    # Thigh vs shin: real upper/lower leg segments are usually within
+    # roughly 3x of each other even accounting for foreshortening.
+    if thigh is not None and shin is not None and shin > 0.01:
+        ratio = thigh / shin
+        if ratio > 3.0 or ratio < 0.33:
+            return False
+
+    return True
+
+
 def calculate_pose_size_coco(person_kps, person_scores, h, w):
     """Rough foreground/background size estimate. Returns None if hips
     aren't detected at all."""
@@ -521,8 +578,14 @@ def select_best_swimmer_coco(all_keypoints, all_scores, water_level, frame, igno
             continue
         if not validate_pose_anatomy_coco(kps, sc, h, w):
             continue
+        if not validate_limb_proportions_coco(kps, sc, h, w):
+            continue
+        # Was 3 — real swimmer detections in a well-framed above-water
+        # figure typically have most of these confidently visible at
+        # once; a sparse, coincidental match on background structure is
+        # less likely to clear a higher bar.
         visible_count = sum(1 for j in [0, 5, 6, 11, 12, 13, 14, 15, 16] if sc[j] > 0.15)
-        if visible_count < 3:
+        if visible_count < 5:
             continue
         return idx
     return None
@@ -823,6 +886,8 @@ class AboveWaterRTMPoseTracker:
             if hip_x < 0.15 or hip_x > 0.85:
                 continue
             if not validate_pose_anatomy_coco(kps, sc, h, w):
+                continue
+            if not validate_limb_proportions_coco(kps, sc, h, w):
                 continue
             distance = np.sqrt((hip_x - locked_position['x'])**2 + (hip_y - locked_position['y'])**2)
             if distance < best_distance:
