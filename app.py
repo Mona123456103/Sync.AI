@@ -578,17 +578,19 @@ def render_model_preload_control():
     col1, col2 = st.columns([3, 2])
     with col1:
         st.caption(
-            "The pose model takes about a minute to load the first time "
-            "it's used in a session. Load it now if you'd rather not wait "
-            "once you're ready to process a video — if it's already warm "
-            "from a recent video on this app, this will be quick instead."
+            "The pose model takes a little while to load the first time "
+            "it's used in a session (longer than before, now that this "
+            "runs the largest/most accurate model). Load it now if you'd "
+            "rather not wait once you're ready to process a video — if "
+            "it's already warm from a recent video on this app, this "
+            "will be quick instead."
         )
     with col2:
         if st.button("Load pose model now", use_container_width=True):
             with st.spinner("Loading pose model..."):
-                _cached_pose_tracker("balanced", 4)
-                _cached_pose_tracker_halpe("balanced", 4, "above")
-                _cached_pose_tracker_halpe("balanced", 4, "below")
+                _cached_pose_tracker("performance", 1)
+                _cached_pose_tracker_halpe("performance", 1, "above")
+                _cached_pose_tracker_halpe("performance", 1, "below")
             st.session_state.models_preloaded = True
             st.rerun()
 
@@ -608,23 +610,25 @@ def render_analyze():
 
     render_model_preload_control()
 
-    # det_frequency controls how often the underlying model re-runs full
-    # person detection vs. reusing/tracking a previous frame's result.
-    # Was 4 — nudged down slightly (a little slower, per direct request
-    # for a bit more accuracy) specifically because a too-infrequent
-    # detector was letting the tracker drift onto — and then stay
-    # locked onto — background clutter for several frames at a time
-    # instead of getting a fresh chance to re-identify the real
-    # swimmer. Kept at 3 per explicit request even after this.
+    # This now matches the exact setup from the original Jupyter
+    # notebook this app is based on: mode="performance" (RTMPose-X,
+    # 384x288 — the largest pose network available in this library) and
+    # det_frequency=1 (the person detector re-runs on every single
+    # frame, no skipping). Landed here after several rounds of trying
+    # lighter/faster settings ("lightweight", "balanced", and various
+    # det_frequency values) that each fell short on above-water tracking
+    # accuracy in practice. Confirmed the real cost first — same
+    # footage took ~10 minutes in Jupyter with this exact config, which
+    # was accepted as worth it for matching detection quality exactly.
     #
-    # mode was "lightweight" — this is the actual pose-ESTIMATION
-    # network (which joint goes where), and unlike det_frequency it
-    # runs on every single frame regardless of that setting, so it's a
-    # much bigger accuracy lever. Bumped to "balanced" after direct
-    # confirmation that the same footage tracks noticeably better
-    # outside this app (very likely running a larger/more accurate
-    # mode there) — det_frequency alone couldn't explain that gap.
-    chosen = dict(mode="balanced", det_frequency=3)
+    # NOTE: if switching mode again in the future, be aware "lightweight"
+    # /"balanced"/"performance" each point to a DIFFERENT set of model
+    # files, and the first use of a mode not already cached needs a
+    # fresh download from download.openmmlab.com — if that host isn't
+    # reachable from wherever this is hosted, the result is no
+    # detections at all (not just lower accuracy), which is what
+    # happened once already when this was set to "balanced".
+    chosen = dict(mode="performance", det_frequency=1)
     waterline_value = None
     max_duration = 60
 
@@ -840,7 +844,7 @@ def render_analyze():
 
                     progress_bar, update_progress = run_with_progress("Walticam")
                     try:
-                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
+                        with st.spinner("Loading pose model (first video in a session takes a while — larger model now; reused after that)..."):
                             above_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "above")
                             below_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "below")
                             st.session_state.models_preloaded = True
@@ -928,7 +932,7 @@ def render_analyze():
                     above_video_file = None
                     below_video_file = None
                     try:
-                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
+                        with st.spinner("Loading pose model (first video in a session takes a while — larger model now; reused after that)..."):
                             shared_pt = _cached_pose_tracker(chosen["mode"], chosen["det_frequency"])
                             st.session_state.models_preloaded = True
 
