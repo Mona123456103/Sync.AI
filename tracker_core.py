@@ -116,7 +116,7 @@ def _finalize_video_for_browser(raw_path, final_path):
     try:
         result = subprocess.run(
             ['ffmpeg', '-y', '-i', raw_path,
-             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
              '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
              '-an', final_path],
             capture_output=True, timeout=300,
