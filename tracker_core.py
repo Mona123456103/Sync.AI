@@ -362,19 +362,20 @@ def validate_limb_proportions_coco(person_kps, person_scores, h, w, conf_thresh=
     thigh = _dist(hip_mid, knee_mid)
     shin = _dist(knee_mid, ankle_mid)
 
-    # Torso vs thigh: a real torso is very rarely more than ~4x a real
-    # thigh, or less than ~1/4 of one, at any camera angle or leg
-    # extension.
+    # Torso vs thigh: widened once already — widened again for extra
+    # margin, since this still runs at fresh selection and rejecting a
+    # real swimmer here means selection falls through to some OTHER
+    # candidate instead, which is worse than letting a slightly odd
+    # ratio through.
     if torso is not None and thigh is not None and thigh > 0.01:
         ratio = torso / thigh
-        if ratio > 4.0 or ratio < 0.25:
+        if ratio > 6.0 or ratio < 0.15:
             return False
 
-    # Thigh vs shin: real upper/lower leg segments are usually within
-    # roughly 3x of each other even accounting for foreshortening.
+    # Thigh vs shin: same reasoning, widened further.
     if thigh is not None and shin is not None and shin > 0.01:
         ratio = thigh / shin
-        if ratio > 3.0 or ratio < 0.33:
+        if ratio > 5.0 or ratio < 0.20:
             return False
 
     return True
@@ -580,12 +581,13 @@ def select_best_swimmer_coco(all_keypoints, all_scores, water_level, frame, igno
             continue
         if not validate_limb_proportions_coco(kps, sc, h, w):
             continue
-        # Was 3 — real swimmer detections in a well-framed above-water
-        # figure typically have most of these confidently visible at
-        # once; a sparse, coincidental match on background structure is
-        # less likely to clear a higher bar.
+        # Was 3, then raised to 5 — dialed back to 4. 5 was too strict
+        # during fast/blurry motion (fewer joints cleanly detected at
+        # once), which meant fresh selection kept failing to find the
+        # real swimmer at all — contributing to the "feels random"
+        # instability, not fixing it.
         visible_count = sum(1 for j in [0, 5, 6, 11, 12, 13, 14, 15, 16] if sc[j] > 0.15)
-        if visible_count < 5:
+        if visible_count < 4:
             continue
         return idx
     return None
@@ -874,8 +876,28 @@ class AboveWaterRTMPoseTracker:
         frames because that check has to pass on EVERY frame to count as
         a match, and it's fragile against splash/foam/lighting. Position
         bounds + anatomy stay — pure geometry, still block a background
-        person from stealing the lock."""
-        best_match, best_distance = None, LOCK_MATCH_DISTANCE
+        person from stealing the lock.
+
+        Deliberately does NOT also require validate_limb_proportions_coco
+        (unlike fresh selection) — during ongoing tracking mid-figure, a
+        real swimmer's apparent limb proportions can look unusual from
+        self-occlusion or extreme extension, and requiring that on top
+        of the distance constraint here was causing more lock-loss
+        events than it prevented, which is what "feels random, jumps
+        between things" looks like: constant fallback to fresh
+        selection instead of a stable continuous lock. Proportions stay
+        checked at fresh selection, where there's no proximity history
+        to lean on and a plausibility check matters more.
+
+        LOCK_MATCH_DISTANCE was 0.15 — barracuda's explosive vertical
+        motion can plausibly exceed that in a single frame even at full
+        (non-halved) frame height, especially at lower/moderate fps,
+        which would fail this match every frame through the fastest
+        part of the motion and force repeated fresh reselection —
+        exactly the kind of instability being reported. Loosened here
+        specifically (not the shared module constant, so nothing else
+        that reads LOCK_MATCH_DISTANCE is affected)."""
+        best_match, best_distance = None, 0.25
         for i, (kps, sc) in enumerate(zip(all_keypoints, all_scores)):
             if sc[11] < 0.10 or sc[12] < 0.10:
                 continue
@@ -886,8 +908,6 @@ class AboveWaterRTMPoseTracker:
             if hip_x < 0.15 or hip_x > 0.85:
                 continue
             if not validate_pose_anatomy_coco(kps, sc, h, w):
-                continue
-            if not validate_limb_proportions_coco(kps, sc, h, w):
                 continue
             distance = np.sqrt((hip_x - locked_position['x'])**2 + (hip_y - locked_position['y'])**2)
             if distance < best_distance:
