@@ -578,19 +578,17 @@ def render_model_preload_control():
     col1, col2 = st.columns([3, 2])
     with col1:
         st.caption(
-            "The pose model takes a little while to load the first time "
-            "it's used in a session (longer than before, now that this "
-            "runs the largest/most accurate model). Load it now if you'd "
-            "rather not wait once you're ready to process a video — if "
-            "it's already warm from a recent video on this app, this "
-            "will be quick instead."
+            "The pose model takes about a minute to load the first time "
+            "it's used in a session. Load it now if you'd rather not wait "
+            "once you're ready to process a video — if it's already warm "
+            "from a recent video on this app, this will be quick instead."
         )
     with col2:
         if st.button("Load pose model now", use_container_width=True):
             with st.spinner("Loading pose model..."):
-                _cached_pose_tracker("performance", 2)
-                _cached_pose_tracker_halpe("performance", 2, "above")
-                _cached_pose_tracker_halpe("performance", 2, "below")
+                _cached_pose_tracker("lightweight", 4)
+                _cached_pose_tracker_halpe("lightweight", 4, "above")
+                _cached_pose_tracker_halpe("lightweight", 4, "below")
             st.session_state.models_preloaded = True
             st.rerun()
 
@@ -610,34 +608,31 @@ def render_analyze():
 
     render_model_preload_control()
 
-    # mode="performance" (RTMPose-X, 384x288 — the largest pose network
-    # available in this library) matches the original Jupyter notebook
-    # this app is based on, and stays that way here — it's the setting
-    # actually confirmed to give good detections in practice, unlike
-    # "lightweight" (too weak for reliable above-water tracking) or
-    # "balanced" (its model files failed to load at all when tried once
-    # on this host — see the NOTE below).
+    # Back to the original fast baseline: mode="lightweight" (RTMPose-S,
+    # 256x192 — the smallest/fastest pose network in this library) and
+    # det_frequency=4 (detector re-runs only every 4th frame). This is
+    # the cheapest setting this app has run at — reverted here after
+    # "performance" mode (tried at det_frequency=1, then 2) gave better
+    # above-water accuracy but triggered a real Streamlit Community
+    # Cloud CPU throttle from sustained heavy load, which made
+    # processing slower in practice than the speed gain was worth.
     #
-    # det_frequency was 1 (matching Jupyter exactly, detector re-runs
-    # every frame) — dialed back to 2 (detector re-runs every other
-    # frame) after that setting triggered a Streamlit Community Cloud
-    # CPU throttle from sustained heavy load. The pose network itself
-    # (the main accuracy driver, and the expensive part) is UNCHANGED —
-    # only how often the separate person-detector re-scans is reduced,
-    # roughly halving total compute vs. det_frequency=1 per the earlier
-    # GFLOPs-based estimate. All the tracking-LOGIC fixes from other
-    # turns (relock history reset, widened above-water thresholds,
-    # limb-proportion validation, wider continuity-match distance) are
-    # independent of this setting and stay in effect regardless.
+    # All the tracking-LOGIC fixes from other turns (relock history
+    # reset, widened above-water height thresholds, limb-proportion
+    # validation, wider continuity-match distance, foot-tracking
+    # emphasis) are independent of mode/det_frequency and stay in
+    # effect regardless — those were about fixing real bugs in the
+    # selection/locking logic, not about which model runs the numbers.
     #
     # NOTE: "lightweight"/"balanced"/"performance" each point to a
-    # DIFFERENT set of model files, and the first use of a mode not
-    # already cached needs a fresh download from
-    # download.openmmlab.com — if that host isn't reachable from
+    # DIFFERENT set of model files. "lightweight" is confirmed cached
+    # and working from extensive earlier use. If switching mode again,
+    # be aware the first use of an uncached mode needs a fresh download
+    # from download.openmmlab.com — if that host isn't reachable from
     # wherever this is hosted, the result is no detections at all (not
     # just lower accuracy), which is what happened once already when
     # this was set to "balanced".
-    chosen = dict(mode="performance", det_frequency=2)
+    chosen = dict(mode="lightweight", det_frequency=4)
     waterline_value = None
     max_duration = 60
 
@@ -853,7 +848,7 @@ def render_analyze():
 
                     progress_bar, update_progress = run_with_progress("Walticam")
                     try:
-                        with st.spinner("Loading pose model (first video in a session takes a while — larger model now; reused after that)..."):
+                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
                             above_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "above")
                             below_pt = _cached_pose_tracker_halpe(chosen["mode"], chosen["det_frequency"], "below")
                             st.session_state.models_preloaded = True
@@ -941,7 +936,7 @@ def render_analyze():
                     above_video_file = None
                     below_video_file = None
                     try:
-                        with st.spinner("Loading pose model (first video in a session takes a while — larger model now; reused after that)..."):
+                        with st.spinner("Loading pose model (first video in a session takes about a minute; reused after that)..."):
                             shared_pt = _cached_pose_tracker(chosen["mode"], chosen["det_frequency"])
                             st.session_state.models_preloaded = True
 
