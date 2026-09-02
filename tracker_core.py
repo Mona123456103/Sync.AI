@@ -866,6 +866,25 @@ class AboveWaterRTMPoseTracker:
         self.max_jump = 0.25
         self.hip_correction_ratio = 0.20
 
+    def _reset_smoothing_history(self):
+        """BUG FIX: called whenever the lock is (re)established, whether
+        that's a fresh initial lock, a fallback re-acquisition after
+        losing lock for 30+ frames, or the periodic relock check
+        switching to a genuinely different candidate. Without this, the
+        weighted-average smoothing in _smooth_all blends the last few
+        frames' positions together with no check that they all belong
+        to the SAME tracked entity — if the lock genuinely moved to a
+        different spot, smoothing averages the stale old position with
+        the new one into a spatially meaningless blend, which is what a
+        skeleton stretched between two unrelated locations in the frame
+        actually is: real output from real (but now-mismatched)
+        history, not a single bad detection."""
+        self.position_history = []
+        self.foot_history = {}
+        self.hip_history = {}
+        self.toe_history = {}
+        self.last_known = {}
+
     def _get_swimmer_position(self, person_kps, person_scores, h, w):
         return get_hip_position(person_kps, person_scores, h, w)
 
@@ -949,6 +968,7 @@ class AboveWaterRTMPoseTracker:
                                         best_person_idx = fresh_idx
                                         self.locked_swimmer = fresh_pos
                                         self._pending_relock_idx, self._pending_relock_streak = None, 0
+                                        self._reset_smoothing_history()
                                 else:
                                     self._pending_relock_idx, self._pending_relock_streak = None, 0
                 else:
@@ -958,11 +978,13 @@ class AboveWaterRTMPoseTracker:
                         if best_person_idx is not None:
                             self.locked_swimmer = self._get_swimmer_position(keypoints[best_person_idx], scores[best_person_idx], h, w)
                             self.frames_since_detection = 0
+                            self._reset_smoothing_history()
             else:
                 best_person_idx = select_best_swimmer_coco(keypoints, scores, water_level, frame_masked, self.ignore_top_percent)
                 if best_person_idx is not None:
                     self.locked_swimmer = self._get_swimmer_position(keypoints[best_person_idx], scores[best_person_idx], h, w)
                     self.frames_since_detection = 0
+                    self._reset_smoothing_history()
         else:
             self.frames_since_detection += 1
             if self.frames_since_detection > self.max_frames_lost:
@@ -1177,6 +1199,14 @@ class RTMPoseUnderwaterTracker:
         self.max_jump = 0.25
         self.hip_correction_ratio = 0.20
 
+    def _reset_smoothing_history(self):
+        """Same bug/fix as AboveWaterRTMPoseTracker — see that class's
+        docstring for why this has to be called whenever the lock is
+        (re)established on a possibly-different candidate."""
+        self.position_history = []
+        self.hip_history = {'left': [], 'right': []}
+        self.last_known = {}
+
     def _select_best_underwater(self, keypoints, scores, h, w):
         best_idx, best_score = None, -1
         for i, (kps, sc) in enumerate(zip(keypoints, scores)):
@@ -1232,6 +1262,7 @@ class RTMPoseUnderwaterTracker:
                                     if self._pending_relock_streak >= 2:
                                         best_idx = fresh_idx
                                         self._pending_relock_idx, self._pending_relock_streak = None, 0
+                                        self._reset_smoothing_history()
                                 else:
                                     self._pending_relock_idx, self._pending_relock_streak = None, 0
                 else:
@@ -1240,10 +1271,12 @@ class RTMPoseUnderwaterTracker:
                         best_idx = self._select_best_underwater(keypoints, scores, h, w)
                         if best_idx is not None:
                             self.frames_since_detection = 0
+                            self._reset_smoothing_history()
             else:
                 best_idx = self._select_best_underwater(keypoints, scores, h, w)
                 if best_idx is not None:
                     self.frames_since_detection = 0
+                    self._reset_smoothing_history()
 
             if best_idx is not None:
                 self.locked_swimmer = get_hip_position(keypoints[best_idx], scores[best_idx], h, w)
