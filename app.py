@@ -588,9 +588,9 @@ def render_model_preload_control():
     with col2:
         if st.button("Load pose model now", use_container_width=True):
             with st.spinner("Loading pose model..."):
-                _cached_pose_tracker("performance", 1)
-                _cached_pose_tracker_halpe("performance", 1, "above")
-                _cached_pose_tracker_halpe("performance", 1, "below")
+                _cached_pose_tracker("performance", 2)
+                _cached_pose_tracker_halpe("performance", 2, "above")
+                _cached_pose_tracker_halpe("performance", 2, "below")
             st.session_state.models_preloaded = True
             st.rerun()
 
@@ -610,25 +610,34 @@ def render_analyze():
 
     render_model_preload_control()
 
-    # This now matches the exact setup from the original Jupyter
-    # notebook this app is based on: mode="performance" (RTMPose-X,
-    # 384x288 — the largest pose network available in this library) and
-    # det_frequency=1 (the person detector re-runs on every single
-    # frame, no skipping). Landed here after several rounds of trying
-    # lighter/faster settings ("lightweight", "balanced", and various
-    # det_frequency values) that each fell short on above-water tracking
-    # accuracy in practice. Confirmed the real cost first — same
-    # footage took ~10 minutes in Jupyter with this exact config, which
-    # was accepted as worth it for matching detection quality exactly.
+    # mode="performance" (RTMPose-X, 384x288 — the largest pose network
+    # available in this library) matches the original Jupyter notebook
+    # this app is based on, and stays that way here — it's the setting
+    # actually confirmed to give good detections in practice, unlike
+    # "lightweight" (too weak for reliable above-water tracking) or
+    # "balanced" (its model files failed to load at all when tried once
+    # on this host — see the NOTE below).
     #
-    # NOTE: if switching mode again in the future, be aware "lightweight"
-    # /"balanced"/"performance" each point to a DIFFERENT set of model
-    # files, and the first use of a mode not already cached needs a
-    # fresh download from download.openmmlab.com — if that host isn't
-    # reachable from wherever this is hosted, the result is no
-    # detections at all (not just lower accuracy), which is what
-    # happened once already when this was set to "balanced".
-    chosen = dict(mode="performance", det_frequency=1)
+    # det_frequency was 1 (matching Jupyter exactly, detector re-runs
+    # every frame) — dialed back to 2 (detector re-runs every other
+    # frame) after that setting triggered a Streamlit Community Cloud
+    # CPU throttle from sustained heavy load. The pose network itself
+    # (the main accuracy driver, and the expensive part) is UNCHANGED —
+    # only how often the separate person-detector re-scans is reduced,
+    # roughly halving total compute vs. det_frequency=1 per the earlier
+    # GFLOPs-based estimate. All the tracking-LOGIC fixes from other
+    # turns (relock history reset, widened above-water thresholds,
+    # limb-proportion validation, wider continuity-match distance) are
+    # independent of this setting and stay in effect regardless.
+    #
+    # NOTE: "lightweight"/"balanced"/"performance" each point to a
+    # DIFFERENT set of model files, and the first use of a mode not
+    # already cached needs a fresh download from
+    # download.openmmlab.com — if that host isn't reachable from
+    # wherever this is hosted, the result is no detections at all (not
+    # just lower accuracy), which is what happened once already when
+    # this was set to "balanced".
+    chosen = dict(mode="performance", det_frequency=2)
     waterline_value = None
     max_duration = 60
 
